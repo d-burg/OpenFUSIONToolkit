@@ -207,15 +207,23 @@ def analyze_bootstrap_edge_spike(psi_N, j_bootstrap, diagnostic_plots=False):
     psi_edge = psi_N[edge_mask]
     j_edge = j_bootstrap[edge_mask]
 
-    # Find peak in the edge region
-    peaks, properties = find_peaks(j_edge, height=0.)#0.5*numpy.max(j_edge))
+    # Find peak in the edge region (prominence filter suppresses noise
+    # oscillations that can be misidentified for small bootstrap spikes)
+    min_prominence = 0.05 * numpy.max(j_edge) if numpy.max(j_edge) > 0 else 0.0
+    peaks, properties = find_peaks(j_edge, height=0., prominence=min_prominence)
 
     if len(peaks) == 0:
         print("No clear peak found in the edge region")
         return None
 
-    # Choose peak closest to psi_N = 1 if multiple peaks exist
-    peak_idx = peaks[numpy.argmax(psi_edge[peaks])]
+    # Among peaks in the far edge (psi_N > 0.85), pick the tallest;
+    # fall back to rightmost peak if none are in that zone.
+    far_edge = psi_edge[peaks] > 0.85
+    if numpy.any(far_edge):
+        far_peaks = peaks[far_edge]
+        peak_idx = far_peaks[numpy.argmax(j_edge[far_peaks])]
+    else:
+        peak_idx = peaks[numpy.argmax(psi_edge[peaks])]
     peak_psi = psi_edge[peak_idx]
     peak_height = j_edge[peak_idx]
 

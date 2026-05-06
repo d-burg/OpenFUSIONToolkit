@@ -182,6 +182,10 @@ tokamaker_set_psi_dt = ctypes_subroutine(oftpy_lib.tokamaker_set_psi_dt,
 tokamaker_set_phantom_vcont = ctypes_subroutine(oftpy_lib.tokamaker_set_phantom_vcont,
     [c_void_p, ctypes_numpy_array(numpy.float64,1), c_bool, c_char_p])
 
+# tokamaker_set_phantom_vcont_loops(tMaker_ptr,R_pos,Z_pos,R_neg,Z_neg,gain,error_str)
+tokamaker_set_phantom_vcont_loops = ctypes_subroutine(oftpy_lib.tokamaker_set_phantom_vcont_loops,
+    [c_void_p, c_double, c_double, c_double, c_double, c_double, c_char_p])
+
 # tokamaker_set_settings(tMaker_ptr,settings,error_str)
 tokamaker_set_settings = ctypes_subroutine(oftpy_lib.tokamaker_set_settings,
     [c_void_p, ctypes.POINTER(tokamaker_settings_struct), c_char_p])

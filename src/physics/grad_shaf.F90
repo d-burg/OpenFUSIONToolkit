@@ -4545,6 +4545,92 @@ DEALLOCATE(ptout)
 !!$omp end parallel
 CALL psi_int%delete
 end subroutine gs_trace_surf
+!------------------------------------------------------------------------------
+!> Add a delta-function current loop at point (R_loop, Z_loop) with current `current`
+!> to the FE source vector `b`.  Locates the containing cell via bmesh_findcell,
+!> evaluates each basis function on that cell at the point's logical coordinates,
+!> and accumulates `current * basis_l(R_loop, Z_loop)` onto the corresponding DOF.
+!>
+!> Used by `gs_set_phantom_vcont_loops` to build a current source for the
+!> phantom VSC channel, so the resulting flux satisfies the same zero-boundary
+!> BC as real coil fluxes (psi_coil(j)%f).
+!------------------------------------------------------------------------------
+subroutine gs_phantom_loop_to_source(self,R_loop,Z_loop,current,b,ierr)
+class(gs_eq), intent(inout) :: self !< G-S object
+real(8), intent(in) :: R_loop !< Radial location of the current loop (m)
+real(8), intent(in) :: Z_loop !< Vertical location of the current loop (m)
+real(8), intent(in) :: current !< Loop current (signed)
+class(oft_vector), intent(inout) :: b !< Source vector to ADD to (in/out)
+integer(4), intent(out) :: ierr !< 0 on success, 1 if point is outside the mesh
+real(8) :: pt(2),f(3)
+real(r8) :: basis_val
+integer(4) :: cell,l
+integer(4), allocatable :: j_lag(:)
+real(r8), pointer, dimension(:) :: btmp
+ierr = 0
+pt = [R_loop, Z_loop]
+cell = 0
+CALL bmesh_findcell(self%fe_rep%mesh, cell, pt, f)
+IF(cell == 0)THEN
+  ierr = 1
+  RETURN
+END IF
+allocate(j_lag(self%fe_rep%nce))
+CALL self%fe_rep%ncdofs(cell, j_lag)
+NULLIFY(btmp)
+CALL b%get_local(btmp)
+DO l = 1, self%fe_rep%nce
+  CALL oft_blag_eval(self%fe_rep, cell, l, f, basis_val)
+  btmp(j_lag(l)) = btmp(j_lag(l)) + current * basis_val
+END DO
+CALL b%restore_local(btmp)
+DEALLOCATE(btmp)
+deallocate(j_lag)
+end subroutine gs_phantom_loop_to_source
+!------------------------------------------------------------------------------
+!> Build the phantom VSC flux (psi_phantom_vcont) from an antisymmetric
+!> current pair at (R_pos, Z_pos) and (R_neg, Z_neg).
+!>
+!> Steps: (1) build delta-function source for both loops, (2) apply zero-boundary
+!> BC, (3) project through gs_vacuum_solve to get a BC-consistent flux.  This
+!> matches the construction of real coils' psi_coil(j)%f, so adding
+!> `vcontrol_val * psi_phantom_vcont` to psi during the GS solve respects the
+!> same boundary conditions as the rest of the equilibrium.
+!------------------------------------------------------------------------------
+subroutine gs_set_phantom_vcont_loops(self,R_pos,Z_pos,R_neg,Z_neg,gain,ierr)
+class(gs_eq), intent(inout) :: self !< G-S object
+real(8), intent(in) :: R_pos !< R of the +current loop (m)
+real(8), intent(in) :: Z_pos !< Z of the +current loop (m)
+real(8), intent(in) :: R_neg !< R of the -current loop (m)
+real(8), intent(in) :: Z_neg !< Z of the -current loop (m)
+real(8), intent(in) :: gain !< Loop current magnitude (A); +gain at (R_pos,Z_pos) and -gain at (R_neg,Z_neg)
+integer(4), intent(out) :: ierr !< 0 on success
+class(oft_vector), pointer :: source_vec
+ierr = 0
+IF(.NOT. ASSOCIATED(self%psi_phantom_vcont))THEN
+  CALL self%psi%new(self%psi_phantom_vcont)
+END IF
+NULLIFY(source_vec)
+CALL self%psi%new(source_vec)
+CALL source_vec%set(0.d0)
+CALL gs_phantom_loop_to_source(self, R_pos, Z_pos, +gain, source_vec, ierr)
+IF(ierr /= 0)THEN
+  CALL source_vec%delete()
+  DEALLOCATE(source_vec)
+  RETURN
+END IF
+CALL gs_phantom_loop_to_source(self, R_neg, Z_neg, -gain, source_vec, ierr)
+IF(ierr /= 0)THEN
+  CALL source_vec%delete()
+  DEALLOCATE(source_vec)
+  RETURN
+END IF
+CALL self%zerob_bc%apply(source_vec)
+CALL gs_vacuum_solve(self, self%psi_phantom_vcont, source_vec, ierr)
+CALL source_vec%delete()
+DEALLOCATE(source_vec)
+IF(ierr == 0) self%phantom_vcont_active = .TRUE.
+end subroutine gs_set_phantom_vcont_loops
 #ifdef OFT_TOKAMAKER_LEGACY
 !------------------------------------------------------------------------------
 !> Needs Docs

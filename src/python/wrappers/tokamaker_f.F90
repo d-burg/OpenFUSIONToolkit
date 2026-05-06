@@ -28,7 +28,8 @@ USE axi_green, ONLY: green
 USE oft_gs, ONLY: gs_eq, gs_save_fields, gs_setup_walls, build_dels, flux_func, &
   gs_fixed_vflux, gs_get_qprof, gs_trace_surf, gs_b_interp, gs_j_interp, gs_prof_interp, &
   gs_plasma_mutual, gs_source, gs_err_reason, gs_coil_source_distributed, gs_vacuum_solve, &
-  gs_coil_mutual, gs_coil_mutual_distributed, gs_project_b, gs_save_mug, gs_update_bounds
+  gs_coil_mutual, gs_coil_mutual_distributed, gs_project_b, gs_save_mug, gs_update_bounds, &
+  gs_set_phantom_vcont_loops
 #ifdef OFT_TOKAMAKER_LEGACY
 USE oft_gs, ONLY: gs_load_regions
 #endif
@@ -1178,6 +1179,32 @@ ELSE
   tMaker_obj%gs%phantom_vcont_active = .FALSE.
 END IF
 END SUBROUTINE tokamaker_set_phantom_vcont
+!---------------------------------------------------------------------------------
+!> Set the phantom VSC flux source from an antisymmetric current pair at
+!> (R_pos, Z_pos) and (R_neg, Z_neg) and activate the phantom path.
+!>
+!> Builds a delta-function current source for both loops, applies the
+!> zero-boundary BC, and projects through gs_vacuum_solve so the resulting
+!> psi_phantom_vcont satisfies the same boundary conditions as real
+!> coil fluxes.  Preferred over the array-based tokamaker_set_phantom_vcont
+!> for production use.
+!---------------------------------------------------------------------------------
+SUBROUTINE tokamaker_set_phantom_vcont_loops(tMaker_ptr,R_pos,Z_pos,R_neg,Z_neg,gain,error_str) BIND(C,NAME="tokamaker_set_phantom_vcont_loops")
+TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_ptr !< TokaMaker instance
+REAL(c_double), VALUE, INTENT(in) :: R_pos !< R of +current loop (m)
+REAL(c_double), VALUE, INTENT(in) :: Z_pos !< Z of +current loop (m)
+REAL(c_double), VALUE, INTENT(in) :: R_neg !< R of -current loop (m)
+REAL(c_double), VALUE, INTENT(in) :: Z_neg !< Z of -current loop (m)
+REAL(c_double), VALUE, INTENT(in) :: gain !< Loop current magnitude (A); +gain at (R_pos,Z_pos), -gain at (R_neg,Z_neg)
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+TYPE(tokamaker_instance), POINTER :: tMaker_obj
+INTEGER(4) :: ierr
+IF(.NOT.tokamaker_ccast(tMaker_ptr,tMaker_obj,error_str))RETURN
+CALL gs_set_phantom_vcont_loops(tMaker_obj%gs, R_pos, Z_pos, R_neg, Z_neg, gain, ierr)
+IF(ierr /= 0)THEN
+  CALL copy_string("Phantom VSC loop build failed (point outside mesh, or vacuum solve failed)", error_str)
+END IF
+END SUBROUTINE tokamaker_set_phantom_vcont_loops
 !---------------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------------

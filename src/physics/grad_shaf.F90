@@ -217,6 +217,8 @@ TYPE :: gs_eq
   REAL(r8), POINTER, DIMENSION(:) :: coil_reg_targets => NULL() !< Targets for coil regularization terms
   REAL(r8), POINTER, DIMENSION(:) :: coil_currs => NULL() !< Coil currents
   REAL(r8), POINTER, DIMENSION(:) :: coil_vcont => NULL() !< Virtual VSC definition as weighted sum of other coils
+  CLASS(oft_vector), POINTER :: psi_phantom_vcont => NULL() !< Phantom VSC flux source (non-physical Z anchor); replaces real-coil-summed psi_vcont when phantom_vcont_active
+  LOGICAL :: phantom_vcont_active = .FALSE. !< If true, use psi_phantom_vcont instead of summing real coils for psi_vcont
   REAL(r8), POINTER, DIMENSION(:,:) :: rlimiter_nds => NULL() !< Location of limiter nodes
   REAL(r8), POINTER, DIMENSION(:,:) :: limiter_pts => NULL() !< Location of non-node limiter points
   REAL(r8), POINTER, DIMENSION(:,:) :: bc_lmat => NULL() !< First part of free-boundary BC matrix
@@ -2290,11 +2292,16 @@ END DO
 #endif
 CALL psi_vac%add(1.d0,1.d0,psi_eddy)
 !
-CALL psi_vcont%set(0.d0)
-DO j=1,self%ncoils
-  ! curr = self%coil_regions(j)%vcont_gain
-  CALL psi_vcont%add(1.d0,self%coil_vcont(j),self%psi_coil(j)%f)
-END DO
+IF(self%phantom_vcont_active.AND.ASSOCIATED(self%psi_phantom_vcont))THEN
+  CALL psi_vcont%set(0.d0)
+  CALL psi_vcont%add(1.d0,1.d0,self%psi_phantom_vcont)
+ELSE
+  CALL psi_vcont%set(0.d0)
+  DO j=1,self%ncoils
+    ! curr = self%coil_regions(j)%vcont_gain
+    CALL psi_vcont%add(1.d0,self%coil_vcont(j),self%psi_coil(j)%f)
+  END DO
+END IF
 !---Save input solution
 IF(self%save_visit.AND.self%plot_final.AND.(eq_count==0))THEN
   CALL self%xdmf%add_timestep(REAL(eq_count,8))
@@ -2788,11 +2795,16 @@ DO j=1,self%ncond_regs
   END DO
 END DO
 #endif
-CALL psi_vcont%set(0.d0)
-DO j=1,self%ncoils
-  ! curr = self%coil_regions(j)%vcont_gain
-  CALL psi_vcont%add(1.d0,self%coil_vcont(j),self%psi_coil(j)%f)
-END DO
+IF(self%phantom_vcont_active.AND.ASSOCIATED(self%psi_phantom_vcont))THEN
+  CALL psi_vcont%set(0.d0)
+  CALL psi_vcont%add(1.d0,1.d0,self%psi_phantom_vcont)
+ELSE
+  CALL psi_vcont%set(0.d0)
+  DO j=1,self%ncoils
+    ! curr = self%coil_regions(j)%vcont_gain
+    CALL psi_vcont%add(1.d0,self%coil_vcont(j),self%psi_coil(j)%f)
+  END DO
+END IF
 
 param_mat=0.d0
 param_rhs=0.d0
@@ -3074,11 +3086,16 @@ END DO
 #endif
 CALL psi_vac%add(1.d0,1.d0,psi_eddy)
 !
-CALL psi_vcont%set(0.d0)
-DO j=1,self%ncoils
-  ! curr = self%coil_regions(j)%vcont_gain
-  CALL psi_vcont%add(1.d0,self%coil_vcont(j),self%psi_coil(j)%f)
-END DO
+IF(self%phantom_vcont_active.AND.ASSOCIATED(self%psi_phantom_vcont))THEN
+  CALL psi_vcont%set(0.d0)
+  CALL psi_vcont%add(1.d0,1.d0,self%psi_phantom_vcont)
+ELSE
+  CALL psi_vcont%set(0.d0)
+  DO j=1,self%ncoils
+    ! curr = self%coil_regions(j)%vcont_gain
+    CALL psi_vcont%add(1.d0,self%coil_vcont(j),self%psi_coil(j)%f)
+  END DO
+END IF
 IF((self%dt>0.d0).AND.oft_env%pm)THEN
   WRITE(*,'(2A)')oft_indent,'Starting vacuum GS solver'
   CALL oft_increase_indent

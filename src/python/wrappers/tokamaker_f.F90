@@ -775,7 +775,13 @@ TYPE(tokamaker_instance), POINTER :: tMaker_obj
 IF(.NOT.tokamaker_ccast(tMaker_ptr,tMaker_obj,error_str))RETURN
 CALL c_f_pointer(reg_currents, coil_regs, [tMaker_obj%gs%mesh%nreg])
 CALL c_f_pointer(currents, vals_tmp, [tMaker_obj%gs%ncoils])
-vals_tmp=(tMaker_obj%gs%coil_currs + tMaker_obj%gs%coil_vcont*tMaker_obj%gs%vcontrol_val)/mu0
+IF(tMaker_obj%gs%phantom_vcont_active.AND.ASSOCIATED(tMaker_obj%gs%psi_phantom_vcont))THEN
+  ! Phantom VSC: vcontrol_val acts on psi_phantom_vcont (non-physical), not on real coils.
+  ! Report real coil currents only; do not attribute VSC channel back to coil_vcont coils.
+  vals_tmp=tMaker_obj%gs%coil_currs/mu0
+ELSE
+  vals_tmp=(tMaker_obj%gs%coil_currs + tMaker_obj%gs%coil_vcont*tMaker_obj%gs%vcontrol_val)/mu0
+END IF
 coil_regs = 0.d0
 DO j=1,tMaker_obj%gs%ncoil_regs
   DO i=1,tMaker_obj%gs%ncoils

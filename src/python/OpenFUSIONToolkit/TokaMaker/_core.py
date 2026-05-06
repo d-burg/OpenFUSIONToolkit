@@ -14,6 +14,37 @@ import ctypes
 import numpy
 from ._interface import *
 
+
+def _antisym_loop_flux(R_obs, Z_obs, R_loop, dZ_loop, current):
+    r'''! Poloidal flux from an antisymmetric circular current pair.
+
+    Computes \f$\psi(R, Z)\f$ at observation points (R_obs, Z_obs) due to two
+    coaxial circular loops at (R_loop, +dZ_loop) carrying +current and at
+    (R_loop, -dZ_loop) carrying -current. Used as the phantom VSC source
+    for set_phantom_vsc().
+
+    Single-loop formula:
+        psi(R,Z; Rl,Zl,I) = (mu0*I/2pi) * sqrt(R*Rl) * [(2/k - k) K(m) - (2/k) E(m)]
+        m = k^2 = 4*R*Rl / ((R+Rl)^2 + (Z-Zl)^2)
+    '''
+    from scipy.special import ellipk, ellipe
+    mu0 = 4.0e-7 * numpy.pi
+
+    def _single(R, Z, Rl, Zl, I):
+        R_safe = numpy.maximum(R, 1.0e-12)
+        denom = (R_safe + Rl)**2 + (Z - Zl)**2
+        m = 4.0 * R_safe * Rl / denom
+        m = numpy.clip(m, 1.0e-30, 1.0 - 1.0e-12)
+        k = numpy.sqrt(m)
+        K = ellipk(m)
+        E = ellipe(m)
+        return (mu0 * I / (2.0 * numpy.pi)) * numpy.sqrt(R_safe * Rl) * \
+               ((2.0 / k - k) * K - (2.0 / k) * E)
+
+    return _single(R_obs, Z_obs, R_loop, +dZ_loop, +current) + \
+           _single(R_obs, Z_obs, R_loop, -dZ_loop, -current)
+
+
 def tokamaker_default_settings(oft_env):
     '''! Initialize settings object with default values
 
@@ -587,6 +618,47 @@ class TokaMaker():
             gains_array[self.coil_sets[coil_key]['id']] = coil_gain
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_set_coil_vsc(self._tMaker_ptr,gains_array,error_string)
+        if error_string.value != b'':
+            raise Exception(error_string.value)
+
+    def set_phantom_vsc(self, R, dZ, gain=1.0, active=True):
+        r'''! Set up a phantom (non-physical) VSC flux source.
+
+        Replaces the real-coil-summed psi_vcont with the analytic flux of
+        an antisymmetric current pair at (R, +dZ) and (R, -dZ). The
+        vcontrol_val Z-anchor in the GS solver still operates on this
+        flux, but it does NOT correspond to any real coil — so coil
+        currents reported by get_coil_currents() remain at the values
+        set via set_coil_currents().
+
+        Use case: forward-mode equilibria where every real coil must be
+        held at its experimental / reconstructed value, while the GS
+        Picard iteration still needs a Z anchor to converge on a
+        vertically-unstable plasma.
+
+        @param R Radial location of the phantom pair (m)
+        @param dZ Vertical half-separation; loops sit at (R, +dZ) and (R, -dZ)
+        @param gain Loop current magnitude in A (sets the scale of vcontrol_val)
+        @param active Activate the phantom path. Pass False to revert to the
+                      coil_vcont-summed psi_vcont (set by set_coil_vsc()).
+        '''
+        error_string = self._oft_env.get_c_errorbuff()
+        if not active:
+            psi = numpy.zeros((self.np,), dtype=numpy.float64)
+            tokamaker_set_phantom_vcont(self._tMaker_ptr, psi, ctypes.c_bool(False), error_string)
+            if error_string.value != b'':
+                raise Exception(error_string.value)
+            return
+        if self.r is None:
+            raise RuntimeError('Mesh not yet loaded; call setup() before set_phantom_vsc()')
+        R_dof = self.r[:, 0]
+        Z_dof = self.r[:, 1]
+        psi = _antisym_loop_flux(R_dof, Z_dof, R, dZ, gain)
+        psi = numpy.ascontiguousarray(psi, dtype=numpy.float64)
+        if psi.shape[0] != self.np:
+            raise IndexError('Phantom psi has wrong shape: got {} expected {}'.format(
+                psi.shape[0], self.np))
+        tokamaker_set_phantom_vcont(self._tMaker_ptr, psi, ctypes.c_bool(True), error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
 

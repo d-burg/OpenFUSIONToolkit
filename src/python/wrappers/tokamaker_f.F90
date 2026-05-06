@@ -1153,6 +1153,32 @@ ELSE
 END IF
 END SUBROUTINE tokamaker_set_psi_dt
 !---------------------------------------------------------------------------------
+!> Set the phantom VSC flux source and activate/deactivate the phantom path.
+!>
+!> When active, psi_phantom_vcont is used as the flux source for the
+!> vcontrol_val Z-anchor, instead of the weighted sum of real-coil fluxes.
+!> Real coil currents (coil_currs) are not modified by the VSC channel in
+!> this mode.
+!---------------------------------------------------------------------------------
+SUBROUTINE tokamaker_set_phantom_vcont(tMaker_ptr,psi_vals,active,error_str) BIND(C,NAME="tokamaker_set_phantom_vcont")
+TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_ptr !< TokaMaker instance
+TYPE(c_ptr), VALUE, INTENT(in) :: psi_vals !< Phantom psi values at FE DOFs (size psi%n); ignored when active=.FALSE.
+LOGICAL(c_bool), VALUE, INTENT(in) :: active !< Activate the phantom path
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+REAL(8), POINTER, DIMENSION(:) :: vals_tmp
+TYPE(tokamaker_instance), POINTER :: tMaker_obj
+IF(.NOT.tokamaker_ccast(tMaker_ptr,tMaker_obj,error_str))RETURN
+IF(LOGICAL(active))THEN
+  IF(.NOT.ASSOCIATED(tMaker_obj%gs%psi_phantom_vcont)) &
+    CALL tMaker_obj%gs%psi%new(tMaker_obj%gs%psi_phantom_vcont)
+  CALL c_f_pointer(psi_vals, vals_tmp, [tMaker_obj%gs%psi%n])
+  CALL tMaker_obj%gs%psi_phantom_vcont%restore_local(vals_tmp)
+  tMaker_obj%gs%phantom_vcont_active = .TRUE.
+ELSE
+  tMaker_obj%gs%phantom_vcont_active = .FALSE.
+END IF
+END SUBROUTINE tokamaker_set_phantom_vcont
+!---------------------------------------------------------------------------------
 !> Needs docs
 !---------------------------------------------------------------------------------
 SUBROUTINE tokamaker_set_settings(tMaker_ptr,settings,error_str) BIND(C,NAME="tokamaker_set_settings")

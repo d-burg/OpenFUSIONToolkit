@@ -4617,19 +4617,31 @@ CALL gs_phantom_loop_to_source(self, R_pos, Z_pos, +gain, source_vec, ierr)
 IF(ierr /= 0)THEN
   CALL source_vec%delete()
   DEALLOCATE(source_vec)
+  self%phantom_vcont_active = .FALSE.   ! see comment below; ensure no stale activation
   RETURN
 END IF
 CALL gs_phantom_loop_to_source(self, R_neg, Z_neg, -gain, source_vec, ierr)
 IF(ierr /= 0)THEN
   CALL source_vec%delete()
   DEALLOCATE(source_vec)
+  self%phantom_vcont_active = .FALSE.   ! see comment below; ensure no stale activation
   RETURN
 END IF
 CALL self%zerob_bc%apply(source_vec)
 CALL gs_vacuum_solve(self, self%psi_phantom_vcont, source_vec, ierr)
 CALL source_vec%delete()
 DEALLOCATE(source_vec)
-IF(ierr == 0) self%phantom_vcont_active = .TRUE.
+IF(ierr == 0)THEN
+  self%phantom_vcont_active = .TRUE.
+ELSE
+  ! On any failure to project the phantom source, FORCE the active flag off
+  ! so subsequent solves don't fire the IF(phantom_vcont_active) branch with
+  ! a stale or partially-updated psi_phantom_vcont (which would silently feed
+  ! garbage gpsi0(2) into the 3x3 param solve and cascade-fail every
+  ! subsequent solve in the session).  The next set_phantom_vsc call from
+  ! Python will retry the build cleanly.
+  self%phantom_vcont_active = .FALSE.
+END IF
 end subroutine gs_set_phantom_vcont_loops
 #ifdef OFT_TOKAMAKER_LEGACY
 !------------------------------------------------------------------------------

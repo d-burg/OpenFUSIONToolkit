@@ -37,7 +37,8 @@ USE oft_gs_util, ONLY: gs_comp_globals, gs_save_eqdsk, gs_save_ifile, gs_profile
   sauter_fc, gs_calc_vloop, gs_save_tokamaker, gs_load_tokamaker
 USE oft_gs_fit, ONLY: fit_gs, fit_pm
 USE oft_gs_td, ONLY: oft_tmaker_td, eig_gs_td
-USE grad_shaf_prof_phys, ONLY: create_dipole_b0_prof, dipole_ani_press, mirror_ani_slosh
+USE grad_shaf_prof_phys, ONLY: create_dipole_b0_prof, dipole_ani_press, mirror_ani_slosh, &
+  jphi_flux_func
 USE diagnostic, ONLY: bscal_surf_int
 USE oft_base_f, ONLY: copy_string, copy_string_rev, oftpy_init
 IMPLICIT NONE
@@ -478,8 +479,18 @@ LOGICAL(c_bool), VALUE, INTENT(in) :: vacuum !< Perform vacuum solve?
 INTEGER(c_int), INTENT(out) :: nl_its !< Number of nonlinear iterations
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
 INTEGER(i4) :: ntargets,ierr
-LOGICAL :: vac_save
+LOGICAL :: vac_save,is_jphi_linterp
 TYPE(tokamaker_instance), POINTER :: tMaker_obj
+! ---- jphi-linterp Ip-correction outer-iteration state ----
+INTEGER(i4) :: outer_it
+INTEGER(i4), PARAMETER :: jphi_ip_max_outer = 5
+REAL(r8), PARAMETER :: jphi_ip_tol = 5.0d-4   ! relative
+REAL(r8), PARAMETER :: jphi_ip_damp = 0.7d0   ! correction^damp
+REAL(r8), PARAMETER :: jphi_ip_min = 0.7d0    ! correction clamp
+REAL(r8), PARAMETER :: jphi_ip_max = 1.3d0    ! correction clamp
+REAL(r8) :: itor_target_orig, ip_phys, ip_phys_target, correction, rel_err
+REAL(r8) :: cent_dummy(2), v_dummy, pv_dummy, df_dummy, tf_dummy, bv_dummy
+INTEGER(i4) :: nl_its_total
 IF(.NOT.tokamaker_ccast(tMaker_ptr,tMaker_obj,error_str))RETURN
 IF(.NOT.tokamaker_require_equil(tMaker_obj,error_str))RETURN
 IF(ANY(tMaker_obj%device%rcoils>0.d0).AND.(tMaker_obj%device%dt>0.d0))THEN
@@ -494,10 +505,86 @@ IF(vacuum)THEN
   tMaker_obj%gs_equil%has_plasma=.FALSE.
 END IF
 tMaker_obj%device%timing=0.d0
-CALL tMaker_obj%device%solve(tMaker_obj%gs_equil,ierr)
+
+! Detect whether the active FFP profile is jphi-linterp.  Only that
+! profile type has the cut-cell + flux-averaging Ip discretization
+! mismatch that this outer loop corrects.  PP'/FF' profiles set
+! directly do not need this loop.
+is_jphi_linterp = .FALSE.
+IF(ASSOCIATED(tMaker_obj%gs_equil%I))THEN
+  SELECT TYPE(I_prof => tMaker_obj%gs_equil%I)
+  CLASS IS(jphi_flux_func)
+    is_jphi_linterp = .TRUE.
+  END SELECT
+END IF
+
+! Single solve when not jphi-linterp (preserves original behaviour
+! exactly for PP'/FF' users).  Also when vacuum=True (no Ip target).
+IF(.NOT.is_jphi_linterp .OR. vacuum)THEN
+  CALL tMaker_obj%device%solve(tMaker_obj%gs_equil,ierr)
+  IF(vacuum)tMaker_obj%gs_equil%has_plasma=vac_save
+  IF(ierr/=0)CALL copy_string(gs_err_reason(ierr),error_str)
+  nl_its=tMaker_obj%device%nl_its
+  RETURN
+END IF
+
+! ---- jphi-linterp outer iteration ----
+! TokaMaker's jphi-linterp profile type normalizes FFP via a flux-
+! surface-averaged integral (gs_flux_int of jphi/(<R>·<1/R>)), but
+! gs_comp_globals reports Ip via the *physical* integral (R·P' +
+! 0.5·FFP/R over plasma area).  The two disagree by ~0.5-1% on D-
+! shaped plasmas due to <R>·<1/R> ≠ R·(1/R) pointwise.  Result: a
+! call with set_targets(Ip=X) lands at get_globals returning X·(1-ε).
+!
+! Fix: iterate the inner Picard with progressively scaled Itor_target
+! until get_globals matches the user's nominal target within
+! jphi_ip_tol.  jphi_update remains stateless from the caller's
+! perspective -- only Itor_target is rescaled at the OFT solve level.
+!
+! ip_phys_target stays at the user's original ask; itor_target is
+! temporarily inflated to compensate for the per-iter mismatch.  At
+! convergence the inflation factor stops growing and ip_phys ~ user's
+! original target.
+
+! jphi_update flips sign of Itor_target after first call; use ABS for
+! consistent target tracking.
+itor_target_orig = ABS(tMaker_obj%gs_equil%Itor_target)
+ip_phys_target = itor_target_orig
+nl_its_total = 0
+ierr = 0
+DO outer_it = 1, jphi_ip_max_outer
+  CALL tMaker_obj%device%solve(tMaker_obj%gs_equil,ierr)
+  nl_its_total = nl_its_total + tMaker_obj%device%nl_its
+  IF(ierr /= 0) EXIT  ! inner Picard failed; bail with whatever we have
+  ! Compute physical Ip from current equilibrium
+  CALL gs_comp_globals(tMaker_obj%gs_equil, ip_phys, cent_dummy, &
+                        v_dummy, pv_dummy, df_dummy, tf_dummy, bv_dummy)
+  ! ip_phys here has same internal units as Itor_target (both mu0*Ip)
+  IF(ABS(ip_phys) <= 0.d0)THEN
+    EXIT  ! degenerate, can't form ratio
+  END IF
+  rel_err = (ABS(ip_phys) - ip_phys_target) / ip_phys_target
+  IF(ABS(rel_err) < jphi_ip_tol) EXIT  ! converged
+  ! Damped multiplicative correction toward target
+  correction = (ip_phys_target / ABS(ip_phys)) ** jphi_ip_damp
+  ! Hard clamp for safety
+  IF(correction > jphi_ip_max) correction = jphi_ip_max
+  IF(correction < jphi_ip_min) correction = jphi_ip_min
+  ! Apply correction to Itor_target (preserve sign convention -- jphi_update
+  ! flips Itor_target negative; ABS-based scaling preserves that).
+  tMaker_obj%gs_equil%Itor_target = SIGN(ABS(tMaker_obj%gs_equil%Itor_target) * correction, &
+                                          tMaker_obj%gs_equil%Itor_target)
+END DO
+
+IF(ierr == 0 .AND. ABS(rel_err) >= jphi_ip_tol .AND. outer_it > jphi_ip_max_outer)THEN
+  ! Did not converge within max_outer; not an error, but worth noting
+  IF(oft_debug_print(1))WRITE(*,*) &
+    '  tokamaker_solve: jphi-linterp Ip-corr did not converge, final rel_err =', rel_err
+END IF
+
 IF(vacuum)tMaker_obj%gs_equil%has_plasma=vac_save
 IF(ierr/=0)CALL copy_string(gs_err_reason(ierr),error_str)
-nl_its=tMaker_obj%device%nl_its
+nl_its = nl_its_total
 END SUBROUTINE tokamaker_solve
 !---------------------------------------------------------------------------------
 !> Perform linear solve to find vacuum solution for given BCs and current sources

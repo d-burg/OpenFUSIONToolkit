@@ -546,12 +546,17 @@ END IF
 ! convergence the inflation factor stops growing and ip_phys ~ user's
 ! original target.
 
-! jphi_update flips sign of Itor_target after first call; use ABS for
-! consistent target tracking.
+! Save user's original Itor_target so we can restore it before returning.
+! jphi_update flips sign of Itor_target inside the Picard, but the magnitude
+! always equals the user's set_targets(Ip=...) value when this routine is
+! entered.  We need to restore the same magnitude (with whatever sign
+! jphi_update last left it) so subsequent solves don't see compounding
+! inflation from prior outer-loop scaling.
 itor_target_orig = ABS(tMaker_obj%gs_equil%Itor_target)
 ip_phys_target = itor_target_orig
 nl_its_total = 0
 ierr = 0
+rel_err = 0.d0
 DO outer_it = 1, jphi_ip_max_outer
   CALL tMaker_obj%device%solve(tMaker_obj%gs_equil,ierr)
   nl_its_total = nl_its_total + tMaker_obj%device%nl_its
@@ -576,7 +581,17 @@ DO outer_it = 1, jphi_ip_max_outer
                                           tMaker_obj%gs_equil%Itor_target)
 END DO
 
-IF(ierr == 0 .AND. ABS(rel_err) >= jphi_ip_tol .AND. outer_it > jphi_ip_max_outer)THEN
+! CRITICAL: restore Itor_target to its original magnitude (preserving
+! the sign jphi_update left it with).  Otherwise the cumulative outer-
+! loop scaling compounds across successive mygs.solve() calls, drifting
+! Itor_target far from the user's set_targets value (observed: 2% drift
+! over a recon flow with dozens of internal solves).  The current FFP
+! is calibrated for the inflated target, so the equilibrium correctly
+! has Ip ~ user_target; only the bookkeeping target is reset.
+tMaker_obj%gs_equil%Itor_target = SIGN(itor_target_orig, &
+                                        tMaker_obj%gs_equil%Itor_target)
+
+IF(ierr == 0 .AND. ABS(rel_err) >= jphi_ip_tol)THEN
   ! Did not converge within max_outer; not an error, but worth noting
   IF(oft_debug_print(1))WRITE(*,*) &
     '  tokamaker_solve: jphi-linterp Ip-corr did not converge, final rel_err =', rel_err

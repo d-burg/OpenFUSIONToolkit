@@ -557,10 +557,16 @@ ip_phys_target = itor_target_orig
 nl_its_total = 0
 ierr = 0
 rel_err = 0.d0
+IF(oft_debug_print(1))WRITE(*,'(A,ES16.8)') &
+  '  [JPHI_IP] outer-loop entry  target_internal=', ip_phys_target
 DO outer_it = 1, jphi_ip_max_outer
   CALL tMaker_obj%device%solve(tMaker_obj%gs_equil,ierr)
   nl_its_total = nl_its_total + tMaker_obj%device%nl_its
-  IF(ierr /= 0) EXIT  ! inner Picard failed; bail with whatever we have
+  IF(ierr /= 0)THEN
+    IF(oft_debug_print(1))WRITE(*,'(A,I0,A,I0)') &
+      '  [JPHI_IP] iter ', outer_it, ' inner solve FAILED ierr=', ierr
+    EXIT
+  END IF
   ! Compute physical Ip from current equilibrium
   CALL gs_comp_globals(tMaker_obj%gs_equil, ip_phys, cent_dummy, &
                         v_dummy, pv_dummy, df_dummy, tf_dummy, bv_dummy)
@@ -569,6 +575,9 @@ DO outer_it = 1, jphi_ip_max_outer
     EXIT  ! degenerate, can't form ratio
   END IF
   rel_err = (ABS(ip_phys) - ip_phys_target) / ip_phys_target
+  IF(oft_debug_print(1))WRITE(*,'(A,I0,A,3ES16.8)') &
+    '  [JPHI_IP] iter ', outer_it, &
+    ' ip_phys / target / rel_err = ', ABS(ip_phys), ip_phys_target, rel_err
   IF(ABS(rel_err) < jphi_ip_tol) EXIT  ! converged
   ! Damped multiplicative correction toward target
   correction = (ip_phys_target / ABS(ip_phys)) ** jphi_ip_damp

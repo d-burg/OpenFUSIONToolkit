@@ -488,9 +488,23 @@ REAL(r8), PARAMETER :: jphi_ip_tol = 5.0d-4   ! relative
 REAL(r8), PARAMETER :: jphi_ip_damp = 0.7d0   ! correction^damp
 REAL(r8), PARAMETER :: jphi_ip_min = 0.7d0    ! correction clamp
 REAL(r8), PARAMETER :: jphi_ip_max = 1.3d0    ! correction clamp
+! Sanity bounds on ip_phys / ip_phys_target -- if gs_comp_globals
+! reports an Ip ratio outside [jphi_ip_ratio_lo, jphi_ip_ratio_hi]
+! after a nominally-successful inner solve, the equilibrium has
+! corrupted (e.g. axis collapsed to device center because a tight-
+! bound QP went singular but still returned ierr=0).  Applying the
+! standard multiplicative correction in that state would inflate
+! Itor_target by a meaningless factor and corrupt downstream solves.
+! Bail without correction; the caller's exception/rollback handler
+! will recover.  The window is intentionally wide (0.3-3.0x) -- a
+! healthy iter 1 lands at ~0.994x for typical D-shape, so 0.3x is
+! ~50 standard deviations of the normal first-iter undershoot.
+REAL(r8), PARAMETER :: jphi_ip_ratio_lo = 0.3d0
+REAL(r8), PARAMETER :: jphi_ip_ratio_hi = 3.0d0
 REAL(r8) :: itor_target_orig, ip_phys, ip_phys_target, correction, rel_err
 REAL(r8) :: cent_dummy(2), v_dummy, pv_dummy, df_dummy, tf_dummy, bv_dummy
 INTEGER(i4) :: nl_its_total
+LOGICAL :: ip_phys_bad
 IF(.NOT.tokamaker_ccast(tMaker_ptr,tMaker_obj,error_str))RETURN
 IF(.NOT.tokamaker_require_equil(tMaker_obj,error_str))RETURN
 IF(ANY(tMaker_obj%device%rcoils>0.d0).AND.(tMaker_obj%device%dt>0.d0))THEN
@@ -571,8 +585,50 @@ DO outer_it = 1, jphi_ip_max_outer
   CALL gs_comp_globals(tMaker_obj%gs_equil, ip_phys, cent_dummy, &
                         v_dummy, pv_dummy, df_dummy, tf_dummy, bv_dummy)
   ! ip_phys here has same internal units as Itor_target (both mu0*Ip)
+  !
+  ! Sanity-check ip_phys before computing a correction factor.  Three
+  ! failure modes are guarded against here, all of which have been
+  ! observed under tight coil-bound homotopy at low j_phi-pinning:
+  !
+  ! (1) ABS(ip_phys) <= 0  -- degenerate; can't form ratio.  (Original
+  !     guard, preserved.)
+  ! (2) ip_phys is NaN/Inf -- happens when the inner solve produced
+  !     a singular flux state that gs_flux_int couldn't integrate
+  !     cleanly.  The Fortran idiom (x /= x) is the portable NaN
+  !     test; combined with the finite-range check below it also
+  !     catches Inf.
+  ! (3) ABS(ip_phys) far outside [jphi_ip_ratio_lo, jphi_ip_ratio_hi]
+  !     x target -- inner solve returned ierr=0 but the equilibrium is
+  !     corrupted (typically: QP at tight bounds went singular,
+  !     plasma collapsed to mesh boundary, ip_phys reflects the
+  !     bogus integral over a "no plasma" region).  Applying a
+  !     correction factor computed from this rel_err would inflate
+  !     Itor_target to nonsense and the next iter's solve would also
+  !     fail.  Better to bail now and let the caller's rollback (e.g.
+  !     bouquet's homotopy pass restore-and-resolve) recover.
+  !
+  ! Observed example (2026-05 PIN_JPHI sweep, homotopy pass 3
+  ! F=+/-1% VSC=+/-1%): inner solve returned ierr=0 but axis was
+  ! at (R, Z) = (0.5, 0.0) (device-center default for "no plasma");
+  ! gs_comp_globals then reported a nonsense ip_phys, and the next
+  ! outer iter scaled Itor_target by the clamped jphi_ip_max=1.3
+  ! before finally failing with ierr=-6.
+  ip_phys_bad = .FALSE.
   IF(ABS(ip_phys) <= 0.d0)THEN
-    EXIT  ! degenerate, can't form ratio
+    ip_phys_bad = .TRUE.
+  ELSE IF(ip_phys /= ip_phys)THEN  ! Fortran NaN test (NaN != NaN)
+    ip_phys_bad = .TRUE.
+  ELSE IF(ABS(ip_phys) < jphi_ip_ratio_lo * ip_phys_target)THEN
+    ip_phys_bad = .TRUE.
+  ELSE IF(ABS(ip_phys) > jphi_ip_ratio_hi * ip_phys_target)THEN
+    ip_phys_bad = .TRUE.
+  END IF
+  IF(ip_phys_bad)THEN
+    IF(oft_debug_print(1))WRITE(*,'(A,I0,A,2ES16.8)') &
+      '  [JPHI_IP] iter ', outer_it, &
+      ' SAFETY BAIL -- ip_phys out of sane range, ip_phys/target =', &
+      ABS(ip_phys), ip_phys_target
+    EXIT  ! caller will see equilibrium as solver produced it; restore handled below
   END IF
   rel_err = (ABS(ip_phys) - ip_phys_target) / ip_phys_target
   IF(oft_debug_print(1))WRITE(*,'(A,I0,A,3ES16.8)') &

@@ -207,9 +207,17 @@ def analyze_bootstrap_edge_spike(psi_N, j_bootstrap, diagnostic_plots=False):
     psi_edge = psi_N[edge_mask]
     j_edge = j_bootstrap[edge_mask]
 
+    # Guard against an empty edge slice (psi_N may not reach the edge region):
+    # numpy.max on a zero-size array raises, where the original code fell through
+    # to find_peaks returning no peaks.
+    if j_edge.size == 0:
+        print("No edge region (psi_N >= 0.7) in profile")
+        return None
+
     # Find peak in the edge region (prominence filter suppresses noise
     # oscillations that can be misidentified for small bootstrap spikes)
-    min_prominence = 0.05 * numpy.max(j_edge) if numpy.max(j_edge) > 0 else 0.0
+    j_edge_max = numpy.max(j_edge)
+    min_prominence = 0.05 * j_edge_max if j_edge_max > 0 else 0.0
     peaks, properties = find_peaks(j_edge, height=0., prominence=min_prominence)
 
     if len(peaks) == 0:

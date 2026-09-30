@@ -533,22 +533,28 @@ IF(gseq%mode/=1)CALL oft_abort("Jphi profile requires (F^2)' formulation","jphi_
 IF(gseq%Ip_target<0.d0)CALL oft_abort("Jphi profile requires Ip target","jphi_update",__FILE__)
 IF(gseq%pax_target<0.d0)CALL oft_abort("Jphi profile requires Pax target","jphi_update",__FILE__)
 !---Get updated flux surface geometry for Jphi -> F*F' mapping
-ALLOCATE(ravgs(self%ngeom+1,4),psi_q(self%ngeom+1),qtmp(self%ngeom+1))
+! The work arrays must have exactly `ngeom` rows: gs_get_qprof declares psi_q(nr), prof(nr) and
+! ravgs(nr,4) with explicit shape (nr = ngeom), so by sequence association a longer leading
+! dimension here would shift columns 2-4 of ravgs by one row per column (<1/R> of surface k+1
+! would be read as that of surface k).
+ALLOCATE(ravgs(self%ngeom,4),psi_q(self%ngeom),qtmp(self%ngeom))
+DO i=1,self%ngeom
+  psi_q(i)=REAL(i-1,8)/REAL(self%ngeom,8)
+END DO
 IF(gseq%diverted)THEN
-  psi_q=[(REAL(i-1,8)/REAL(self%ngeom,8),i=1,self%ngeom)]
   psi_q(1)=psi_q(2)
   CALL gs_get_qprof(gseq,self%ngeom,psi_q,qtmp,ravgs=ravgs)
   psi_q(1)=0.d0
   ravgs(1,1)=gseq%lim_point(1)
   ravgs(1,2)=1.d0/gseq%lim_point(1)
 ELSE
-  psi_q=[(REAL(i-1,8)/REAL(self%ngeom,8),i=1,self%ngeom)]
   CALL gs_get_qprof(gseq,self%ngeom,psi_q,qtmp,ravgs=ravgs)
 END IF
 ! WRITE(*,*)'  <R>     = ',ravgs(2,1),ravgs(self%ngeom-2,1)
 ! WRITE(*,*)'  <1/R>   = ',ravgs(2,2),ravgs(self%ngeom-2,2)
+!---Spline nodes 0..ngeom-2 are surfaces psi_q(1:ngeom-1) (boundary side first); node ngeom-1 is the axis
 CALL spline_alloc(R_spline,self%ngeom-1,2)
-R_spline%xs(0:self%ngeom-2)=psi_q; R_spline%xs(self%ngeom-1)=1.d0
+R_spline%xs(0:self%ngeom-2)=psi_q(1:self%ngeom-1); R_spline%xs(self%ngeom-1)=1.d0
 R_spline%fs(0:self%ngeom-2,1)=ravgs(1:self%ngeom-1,1); R_spline%fs(self%ngeom-1,1)=gseq%o_point(1)
 R_spline%fs(0:self%ngeom-2,2)=ravgs(1:self%ngeom-1,2); R_spline%fs(self%ngeom-1,2)=1.d0/gseq%o_point(1)
 CALL spline_fit(R_spline,"extrap")

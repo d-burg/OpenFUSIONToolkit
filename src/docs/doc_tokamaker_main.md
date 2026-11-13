@@ -67,6 +67,34 @@ new meshes, see \ref doc_gs_main_mesh_ex.
 \section doc_gs_main_conv Conventions
  - \subpage doc_tokamaker_current_conventions
 
+\section doc_gs_main_lcfs Plasma source at the boundary (cut-cell quadrature)
+By default the plasma source and the plasma integrals (current, stored energy, volume, ...) are evaluated at the
+quadrature points of each cell in the plasma region, and a point contributes only if it lies inside the LCFS
+(\f$ \psi > \psi_{LCFS} \f$ and on the plasma side of the X-point half-planes). When the pressure gradient or the
+current density is finite at the LCFS (for example pedestal profiles from reconstructions), the assembled source then
+changes by a finite amount whenever a quadrature point crosses the boundary between two nonlinear iterations, and the
+Picard iteration can end in a limit cycle (period 2 or 3, often with a nearly constant residual) instead of converging.
+
+Setting `lcfs_cut_cells = True` (\ref OpenFUSIONToolkit.TokaMaker._core.tokamaker_settings "TokaMaker settings")
+replaces this point test by a cut-cell quadrature. In each plasma-region cell the plasma part is the part where the
+linear interpolant of \f$ \psi - \psi_{LCFS} \f$ on the cell's vertices is positive (also restricted by the X-point
+half-planes); the cell's quadrature rule is mapped onto triangles covering that part, and the flux functions are
+evaluated at \f$ \max(\psi, \psi_{LCFS}) \f$. Cells wholly inside use their standard rule, which the clipped rule
+reduces to exactly, so every plasma integral is a continuous function of the nodal \f$ \psi \f$ and of
+\f$ \psi_{LCFS} \f$. The same quadrature is used for the right-hand side, the target and normalization integrals
+(Ip, stored energy, `jphi-linterp` normalization, bootstrap integrals), the fit constraints and the reported global
+quantities, so the reported plasma current equals the current of the solved source.
+
+The continuum problem is unchanged; only the integration of the (discontinuous) source in cells crossed by the LCFS
+differs, by the mesh's own boundary-discretization error. Converged results therefore change slightly when the setting
+is switched on (typically 1e-5 to 1e-3 relative in stored energy and q on common meshes), which is why it is off by
+default. The time-dependent and linear-stability operators (`setup_td`, `eig_td`) keep the point test.
+
+```
+mygs.settings.lcfs_cut_cells = True
+mygs.update_settings()
+```
+
 \section doc_gs_main_mesh Building meshes using gs_Domain
 TokaMaker includes built-in meshing functionality through the \ref OpenFUSIONToolkit.TokaMaker.meshing.gs_Domain "gs_Domain" class,
 which leverages the [triangle](https://pypi.org/project/triangle/) python package to generated unstructured triangular grids.

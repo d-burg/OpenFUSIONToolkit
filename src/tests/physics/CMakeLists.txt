@@ -35,6 +35,10 @@ if( OFT_BUILD_TESTS )
   oft_add_test( test_axi_green.F90 )
   configure_file( test_axi_green.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 
+  # TokaMaker cut-cell quadrature tests
+  oft_add_test( test_gs_cut_cell.F90 )
+  configure_file( test_gs_cut_cell.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
+
   # ThinCurr triangle kernel tests
   oft_add_test( test_thin_wall_kernels.F90 )
   configure_file( test_thin_wall_kernels.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

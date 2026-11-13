@@ -1832,9 +1832,12 @@ real(8), intent(out) :: itor !< Plasma toroidal current
 real(r8), pointer, dimension(:) :: btmp
 real(8) :: psitmp(1),goptmp(3,3),det,pt(3),v,t1,b_tmp,itor_loc,pani(2),bcross_kappa(1),gpsitmp(3)
 real(8), allocatable :: rhs_loc(:),cond_fac(:),rop(:)
-integer(4) :: j,m,l,k
+real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
+real(8), pointer, dimension(:,:) :: qpts
+real(8), pointer, dimension(:) :: qwts
+integer(4) :: j,m,l,k,nq,ncut_max
 integer(4), allocatable :: j_lag(:)
-logical :: curved
+logical :: curved,cut_cells
 type(oft_lag_brinterp), target :: psi_eval,bcross_kappa_fun
 type(oft_lag_bginterp), target :: psi_geval
 type(gs_factory), pointer :: device
@@ -1856,21 +1859,27 @@ END IF
 !---
 mutual=0.d0
 itor=0.d0
+cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
+ncut_max=0
+IF(cut_cells)ncut_max=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points)
 !$omp parallel private(j,j_lag,curved,goptmp,v,m,det,pt,psitmp,b_tmp,l,rop,itor_loc,pani,bcross_kappa,gpsitmp) reduction(+:mutual) &
-!$omp reduction(+:itor)
+!$omp private(cut_pts,cut_wts,qpts,qwts,nq) reduction(+:itor)
 allocate(rop(device%fe_rep%nce))
 allocate(j_lag(device%fe_rep%nce))
+allocate(cut_pts(3,ncut_max),cut_wts(ncut_max)) ! Empty without cut cells
 !$omp do schedule(static)
 DO j=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(j)/=1)CYCLE
   call device%fe_rep%ncdofs(j,j_lag)
   curved=cell_is_curved(device%fe_rep%mesh,j)
-  do m=1,device%fe_rep%quad%np
-    if(curved.OR.(m==1))call device%fe_rep%mesh%jacobian(j,device%fe_rep%quad%pts(:,m),goptmp,v)
-    call psi_eval%interp(j,device%fe_rep%quad%pts(:,m),goptmp,psitmp)
-    pt=device%fe_rep%mesh%log2phys(j,device%fe_rep%quad%pts(:,m))
+  CALL gs_plasma_cell_quad(self,j,cut_cells,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
+  do m=1,nq
+    if(curved.OR.(m==1))call device%fe_rep%mesh%jacobian(j,qpts(:,m),goptmp,v)
+    call psi_eval%interp(j,qpts(:,m),goptmp,psitmp)
+    pt=device%fe_rep%mesh%log2phys(j,qpts(:,m))
+    IF(cut_cells)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
     !---Compute Magnetic Field
-    IF(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1))THEN
+    IF(cut_cells.OR.(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1)))THEN
       IF(self%mode==0)THEN
         itor_loc = self%I%Fp(psitmp(1))*((self%ffp_scale**2)*self%I%f(psitmp(1))+self%ffp_scale*self%I%f_offset)/(pt(1)+gs_epsilon)
       ELSE
@@ -1878,24 +1887,24 @@ DO j=1,device%fe_rep%mesh%nc
       END IF
       ! Handle anisotropic pressure
       IF(ASSOCIATED(self%P_ani))THEN
-        CALL self%P_ani%interp(j,device%fe_rep%quad%pts(:,m),goptmp,pani)
-        CALL bcross_kappa_fun%interp(j,device%fe_rep%quad%pts(:,m),goptmp,bcross_kappa)
+        CALL self%P_ani%interp(j,qpts(:,m),goptmp,pani)
+        CALL bcross_kappa_fun%interp(j,qpts(:,m),goptmp,bcross_kappa)
         itor_loc = itor_loc + self%p_scale*pt(1)*(self%P%fp(psitmp(1))*pani(2)+self%P%f(psitmp(1))*(pani(1)-pani(2))*bcross_kappa(1))
       ELSE
         itor_loc = itor_loc + self%p_scale*pt(1)*self%P%Fp(psitmp(1))
       END IF
       b_tmp=0.d0
       DO l=1,device%fe_rep%nce
-        CALL oft_blag_eval(device%fe_rep,j,l,device%fe_rep%quad%pts(:,m),rop(l))
+        CALL oft_blag_eval(device%fe_rep,j,l,qpts(:,m),rop(l))
         b_tmp=b_tmp+btmp(j_lag(l))*rop(l)
       END DO
-      det = v*device%fe_rep%quad%wts(m)
+      det = v*qwts(m)
       itor = itor + itor_loc*det
       mutual = mutual + b_tmp*itor_loc*det
     END IF
   end do
 end do
-deallocate(j_lag,rop)
+deallocate(j_lag,rop,cut_pts,cut_wts)
 !$omp end parallel
 mutual=mu0*2.d0*pi*mutual/itor
 IF(ASSOCIATED(bcross_kappa_fun%u))THEN
@@ -3971,7 +3980,11 @@ type(oft_lag_brinterp), target :: psi_eval,bcross_kappa_fun
 type(oft_lag_bginterp), target :: psi_geval
 real(8) :: itor_loc,goptmp(3,3),v,psitmp(1),bcross_kappa(1),H,ani_fac,pani(2)
 real(8) :: pt(3),curr_cent(2)
-integer(4) :: i,m
+real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
+real(8), pointer, dimension(:,:) :: qpts
+real(8), pointer, dimension(:) :: qwts
+integer(4) :: i,m,nq
+logical :: cut_cells
 type(gs_factory), pointer :: device
 IF(.NOT.self%has_plasma)THEN
   IF(PRESENT(centroid))centroid = 0.d0
@@ -3993,15 +4006,21 @@ END IF
 !---
 itor=0.d0
 curr_cent=0.d0
+cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
+nq=0
+IF(cut_cells)nq=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points)
+ALLOCATE(cut_pts(3,nq),cut_wts(nq)) ! Empty without cut cells
 do i=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(i)/=1)CYCLE
-  do m=1,device%fe_rep%quad%np
-    call device%fe_rep%mesh%jacobian(i,device%fe_rep%quad%pts(:,m),goptmp,v)
-    call psi_eval%interp(i,device%fe_rep%quad%pts(:,m),goptmp,psitmp)
+  CALL gs_plasma_cell_quad(self,i,cut_cells,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
+  do m=1,nq
+    call device%fe_rep%mesh%jacobian(i,qpts(:,m),goptmp,v)
+    call psi_eval%interp(i,qpts(:,m),goptmp,psitmp)
     ! IF(psitmp(1)<self%plasma_bounds(1).OR.psitmp(1)>self%plasma_bounds(2))CYCLE
-    pt=device%fe_rep%mesh%log2phys(i,device%fe_rep%quad%pts(:,m))
+    pt=device%fe_rep%mesh%log2phys(i,qpts(:,m))
+    IF(cut_cells)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
     !---Compute Magnetic Field
-    IF(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1))THEN
+    IF(cut_cells.OR.(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1)))THEN
       IF(self%mode==0)THEN
         itor_loc = self%I%Fp(psitmp(1))*((self%ffp_scale**2)*self%I%f(psitmp(1))+self%ffp_scale*self%I%f_offset)/(pt(1)+gs_epsilon)
       ELSE
@@ -4009,17 +4028,18 @@ do i=1,device%fe_rep%mesh%nc
       END IF
       ! Handle anisotropic pressure
       IF(ASSOCIATED(self%P_ani))THEN
-        CALL self%P_ani%interp(i,device%fe_rep%quad%pts(:,m),goptmp,pani)
-        CALL bcross_kappa_fun%interp(i,device%fe_rep%quad%pts(:,m),goptmp,bcross_kappa)
+        CALL self%P_ani%interp(i,qpts(:,m),goptmp,pani)
+        CALL bcross_kappa_fun%interp(i,qpts(:,m),goptmp,bcross_kappa)
         itor_loc = itor_loc + self%p_scale*pt(1)*(self%P%fp(psitmp(1))*pani(2)+self%P%f(psitmp(1))*(pani(1)-pani(2))*bcross_kappa(1))
       ELSE
         itor_loc = itor_loc + self%p_scale*pt(1)*self%P%Fp(psitmp(1))
       END IF
-      itor = itor + itor_loc*v*device%fe_rep%quad%wts(m)
-      curr_cent = curr_cent + itor_loc*pt(1:2)*v*device%fe_rep%quad%wts(m)
+      itor = itor + itor_loc*v*qwts(m)
+      curr_cent = curr_cent + itor_loc*pt(1:2)*v*qwts(m)
     END IF
   end do
 end do
+DEALLOCATE(cut_pts,cut_wts)
 IF(PRESENT(centroid))centroid = curr_cent/itor
 itor=itor*self%psiscale
 IF(ASSOCIATED(bcross_kappa_fun%u))THEN
@@ -4659,22 +4679,33 @@ real(8) :: dflux !< Toroidal flux increment due to plasma
 type(oft_lag_brinterp), target :: psi_eval
 real(8) :: goptmp(3,3),v,psitmp(1),pt(3)
 real(8) :: Btor
-integer(4) :: i,m
+real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
+real(8), pointer, dimension(:,:) :: qpts
+real(8), pointer, dimension(:) :: qwts
+integer(4) :: i,m,nq,ncut_max
+logical :: cut_cells
 type(gs_factory), pointer :: device
 device=>self%device
 !---
 psi_eval%u=>self%psi
 CALL psi_eval%setup(device%fe_rep)
 dflux=0.d0
-!$omp parallel do private(m,pt,goptmp,v,psitmp,Btor) reduction(+:dflux)
+cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
+ncut_max=0
+IF(cut_cells)ncut_max=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points)
+!$omp parallel private(m,pt,goptmp,v,psitmp,Btor,cut_pts,cut_wts,qpts,qwts,nq) reduction(+:dflux)
+allocate(cut_pts(3,ncut_max),cut_wts(ncut_max)) ! Empty without cut cells
+!$omp do
 do i=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(i)/=1)CYCLE
-  do m=1,device%fe_rep%quad%np
-    call device%fe_rep%mesh%jacobian(i,device%fe_rep%quad%pts(:,m),goptmp,v)
-    call psi_eval%interp(i,device%fe_rep%quad%pts(:,m),goptmp,psitmp)
+  CALL gs_plasma_cell_quad(self,i,cut_cells,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
+  do m=1,nq
+    call device%fe_rep%mesh%jacobian(i,qpts(:,m),goptmp,v)
+    call psi_eval%interp(i,qpts(:,m),goptmp,psitmp)
     ! IF(psitmp(1)<self%plasma_bounds(1).OR.psitmp(1)>self%plasma_bounds(2))CYCLE
-    pt=device%fe_rep%mesh%log2phys(i,device%fe_rep%quad%pts(:,m))
-    IF(gs_test_bounds(self,pt).AND.(psitmp(1)>self%plasma_bounds(1)))THEN
+    pt=device%fe_rep%mesh%log2phys(i,qpts(:,m))
+    IF(cut_cells)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
+    IF(cut_cells.OR.(gs_test_bounds(self,pt).AND.(psitmp(1)>self%plasma_bounds(1))))THEN
       pt(1)=MAX(pt(1),gs_epsilon)
       !---Compute differential toroidal Field
       IF(self%mode==0)THEN
@@ -4684,10 +4715,12 @@ do i=1,device%fe_rep%mesh%nc
         - self%I%f_offset)/pt(1)
       END IF
       !---Update integrand
-      dflux = dflux + Btor*v*device%fe_rep%quad%wts(m)
+      dflux = dflux + Btor*v*qwts(m)
     END IF
   end do
 end do
+deallocate(cut_pts,cut_wts)
+!$omp end parallel
 dflux=dflux*self%psiscale
 end function gs_dflux
 !------------------------------------------------------------------------------

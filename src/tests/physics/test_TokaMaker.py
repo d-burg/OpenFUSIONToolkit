@@ -961,6 +961,126 @@ def test_ITER_concurrent():
     assert validate_dict(results,ITER_eq_dict)
 
 #============================================================================
+def create_ITER_mesh(mesh_resolution,filename):
+    '''ITER test geometry of run_ITER_case meshed at a given resolution'''
+    with open('ITER_geom.json','r') as fid:
+        ITER_geom = json.load(fid)
+    gs_mesh = gs_Domain()
+    gs_mesh.define_region('air',0.6/mesh_resolution,'boundary')
+    gs_mesh.define_region('plasma',0.15/mesh_resolution,'plasma')
+    gs_mesh.define_region('vacuum1',0.3/mesh_resolution,'vacuum')
+    gs_mesh.define_region('vacuum2',0.3/mesh_resolution,'vacuum')
+    gs_mesh.define_region('vv1',0.3/mesh_resolution,'conductor',eta=6.9E-7)
+    gs_mesh.define_region('vv2',0.3/mesh_resolution,'conductor',eta=6.9E-7)
+    for key, coil in ITER_geom['coils'].items():
+        if not key.startswith('VS'):
+            gs_mesh.define_region(key,0.2/mesh_resolution,'coil')
+    gs_mesh.define_region('VSU',0.2/mesh_resolution,'coil',coil_set='VS',nTurns=1.0)
+    gs_mesh.define_region('VSL',0.2/mesh_resolution,'coil',coil_set='VS',nTurns=-1.0)
+    gs_mesh.add_polygon(ITER_geom['limiter'],'plasma',parent_name='vacuum1')
+    gs_mesh.add_annulus(ITER_geom['inner_vv'][0],'vacuum1',ITER_geom['inner_vv'][1],'vv1',parent_name='vacuum2')
+    gs_mesh.add_annulus(ITER_geom['outer_vv'][0],'vacuum2',ITER_geom['outer_vv'][1],'vv2',parent_name='air')
+    for key, coil in ITER_geom['coils'].items():
+        if key.startswith('VS'):
+            gs_mesh.add_rectangle(coil['rc'],coil['zc'],coil['w'],coil['h'],key,parent_name='vacuum1')
+        else:
+            gs_mesh.add_rectangle(coil['rc'],coil['zc'],coil['w'],coil['h'],key,parent_name='air')
+    mesh_pts, mesh_lc, mesh_reg = gs_mesh.build_mesh()
+    save_gs_mesh(mesh_pts,mesh_lc,mesh_reg,gs_mesh.get_coils(),gs_mesh.get_conductors(),filename)
+
+
+def run_ITER_edge_case(mesh_resolution,cut_cells,helicity,mp_q):
+    '''Free-boundary ITER case of run_ITER_case with a finite pressure gradient at the LCFS, P' = 1 - psi^4 + 0.3
+    (a pedestal-like edge), and the shape targets moved up by 6 cm. With the point test at the LCFS
+    (`lcfs_cut_cells = False`) the source jumps whenever a quadrature point crosses the LCFS, and this case can end in a
+    period-2 cycle of the Picard iteration (residual 1.0E-3 after 40 iterations on Linux x86-64 with gcc 12; which
+    inputs do so depends on the platform). After the solve, psi is tilted vertically in 400 small steps (moving the
+    LCFS by about 1 mm in total, bounds recomputed at each step) to measure how the plasma volume, an integral over the
+    plasma part of the cells, changes per step. (The current and stored energy are not used here: the flux functions keep
+    the normalization of the solve, so their integrands themselves change where psi falls below its old LCFS value.)'''
+    mesh_file = 'ITER_mesh_r{0:g}.h5'.format(mesh_resolution)
+    if not os.path.exists(mesh_file):
+        try:
+            create_ITER_mesh(mesh_resolution,mesh_file)
+        except Exception as e:
+            print(e)
+            mp_q.put(None)
+            return
+    myOFT = OFT_env(nthreads=-1)
+    mygs = TokaMaker(myOFT)
+    mesh_pts,mesh_lc,mesh_reg,coil_dict,cond_dict = load_gs_mesh(mesh_file)
+    mygs.setup_model(mesh_pts,mesh_lc,reg=mesh_reg,cond_dict=cond_dict,coil_dict=coil_dict,order=2,F0=helicity*5.3*6.2)
+    mygs.set_coil_vsc({'VS': 1.0})
+    mygs.set_coil_bounds({key: [-50.E6, 50.E6] for key in mygs.coil_sets})
+    mygs.set_targets(Ip=15.6E6, pax=6.2E5)
+    isoflux_pts = np.array([
+        [ 8.20,  0.41], [ 8.06,  1.46], [ 7.51,  2.62], [ 6.14,  3.78], [ 4.51,  3.02],
+        [ 4.26,  1.33], [ 4.28,  0.08], [ 4.49, -1.34], [ 7.28, -1.89], [ 8.00, -0.68]
+    ])
+    x_point = np.array([[5.125, -3.4],])
+    isoflux_pts[:,1] += 0.06
+    x_point[:,1] += 0.06
+    mygs.set_isoflux(np.vstack((isoflux_pts,x_point)))
+    mygs.set_saddles(x_point)
+    regularization_terms = []
+    for name in mygs.coil_sets:
+        if name.startswith('CS1'):
+            regularization_terms.append(mygs.coil_reg_term({name: 1.0},target=0.0,weight=2.E-2))
+        elif name.startswith(('CS','PF','VS')):
+            regularization_terms.append(mygs.coil_reg_term({name: 1.0},target=0.0,weight=1.E-2))
+    regularization_terms.append(mygs.coil_reg_term({'#VSC': 1.0},target=0.0,weight=1.E2))
+    mygs.set_coil_reg(reg_terms=regularization_terms)
+    ffp_prof = create_power_flux_fun(40,1.5,2.0)
+    pp_prof = create_power_flux_fun(40,4.0,1.0)
+    pp_prof['y'] += 0.3
+    mygs.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof)
+    mygs.settings.lcfs_cut_cells = cut_cells
+    mygs.update_settings()
+    mygs.init_psi(6.3, 0.56, 2.0, 1.4, 0.0)
+    try:
+        _, nl_its = mygs.solve(return_its=True)
+        eq_info = mygs.get_stats(li_normalization='ITER')
+        eq_info['nl_its'] = nl_its
+    except ValueError:
+        eq_info = {'nl_its': -1}
+    psi0 = mygs.get_psi(False)
+    tilt = (mygs.r[:,1]-mygs.o_point[1])*abs(mygs.psi_bounds[1]-mygs.psi_bounds[0])
+    vol_vals = []
+    for eps in np.linspace(-2.E-4,2.E-4,401):
+        mygs.set_psi(psi0+eps*tilt,update_bounds=True)
+        vol_vals.append(mygs.get_globals()[2])
+    steps = np.abs(np.diff(vol_vals))
+    eq_info['vol_step_ratio'] = np.max(steps)/np.median(steps)
+    mp_q.put([eq_info])
+    oftpy_dump_cov()
+
+
+@pytest.mark.coverage
+@pytest.mark.parametrize("helicity", (1.0,-1.0))
+def test_ITER_cut_cells(helicity):
+    # Reference: the same case on a mesh refined by two
+    ref = mp_run(run_ITER_edge_case,(2.0,True,helicity),timeout=120)
+    assert ref is not None
+    assert ref[0]['nl_its'] > 0
+    results = mp_run(run_ITER_edge_case,(1.0,True,helicity))
+    assert results is not None
+    assert results[0]['nl_its'] > 0
+    exp_dict = {key: ref[0][key] for key in ('Ip','W_MHD','vol','q_0','q_95','l_i','beta_pol')}
+    assert validate_dict(results,exp_dict)
+    # Plasma integrals continuous in psi: no step stands out from the smooth trend
+    assert results[0]['vol_step_ratio'] < 3.0
+    assert ref[0]['vol_step_ratio'] < 3.0
+
+
+@pytest.mark.coverage
+def test_ITER_point_test_jumps():
+    # Without the cut-cell quadrature the plasma integrals jump when quadrature points cross the LCFS
+    results = mp_run(run_ITER_edge_case,(1.0,False,1.0))
+    assert results is not None
+    assert results[0]['vol_step_ratio'] > 3.0
+
+
+#============================================================================
 def run_LTX_case(fe_order,test_type,mp_q):
     def create_mesh():
         with open('LTX_geom.json','r') as fid:

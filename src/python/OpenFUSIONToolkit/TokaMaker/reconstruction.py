@@ -812,7 +812,7 @@ class reconstruction():
         @param err Error in constraint
         @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._saddles.append(saddle_con(p1=p1, p2=p2, width=width, val=val, err=err, use=use))
+        self._saddles.append(saddle_con(pt1=p1, pt2=p2, width=width, val=val, err=err, use=use))
 
     def add_pressure(self,loc,val,err,use=True):
         '''! Add plasma pressure constraint

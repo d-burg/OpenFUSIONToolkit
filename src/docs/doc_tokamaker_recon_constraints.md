@@ -82,7 +82,9 @@ the largest distance moved) and prints a warning. Saddle loop legs off the mesh 
 
 ## Constraint file records
 Each record is a blank line, the type id, and the lines below (values separated by spaces; the last line holds the
-value and the weight).
+value and the weight). Real numbers are written with 17 significant digits
+(`reconstruction.con_file_real_format`), so the solver uses exactly the values given in Python; files written
+earlier with 7 significant digits are read as before.
 
 | Type | Lines after the type id |
 |---|---|

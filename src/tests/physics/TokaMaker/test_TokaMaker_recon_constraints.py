@@ -188,6 +188,88 @@ def test_recon_mse_in_reconstruct():
     assert abs(fit_out[row, 2] - err_mat[row, 1]) <= 5.E-12*abs(err_mat[row, 1])
 
 
+def probe_points(loc, norm, length, n_avg):
+    '''Averaging points of a finite-length probe, computed as the Fortran does (see `Mirnov_con`)'''
+    tnorm = np.sqrt(norm[0]**2 + norm[2]**2)
+    if length >= 0.0:
+        t = (norm[0]/tnorm, norm[2]/tnorm)
+    else:
+        t = (-norm[2]/tnorm, norm[0]/tnorm)
+    pts = []
+    for k in range(n_avg):
+        s = (float(k) - 0.5*float(n_avg-1))*abs(length)/float(n_avg)
+        pts.append([loc[0] + s*t[0], loc[1] + s*t[1]])
+    return np.array(pts)
+
+
+# Finite-length probes (center, normal, length, n_avg). The first two have averaging points that are exact binary
+# fractions, so point probes at the same points see exactly the same locations.
+finite_probes = [
+    ([6.0, 2.0], [1.0, 0.0, 0.0], 0.5, 4),
+    ([6.0, 2.0], [0.0, 0.0, 1.0], -1.0, 8),
+    ([7.0, -1.0], [0.6, 0.0, 0.8], 0.25, 25),
+    ([5.0, 0.0], [0.6, 0.0, 0.8], 0.1, 1),
+    ([6.0, 2.0], [1.0, 0.0, 0.0], 0.0, 3),
+]
+
+
+def run_finite_probe_case(mp_q):
+    mygs, _ = solve_ITER_reference(1.0, 2)
+    if mygs is None:
+        mp_q.put(None)
+        return
+    myrecon = reconstruction(mygs)
+    for loc, norm, length, n_avg in finite_probes:
+        myrecon.add_Mirnov(loc, norm, 0.0, 1.0, length=length, n_avg=n_avg)
+    # Point probes at the center of each probe, then at the averaging points of the first two
+    for loc, norm, _, _ in finite_probes:
+        myrecon.add_Mirnov(loc, norm, 0.0, 1.0)
+    for loc, norm, length, n_avg in finite_probes[:2]:
+        for pt in probe_points(loc, norm, length, n_avg):
+            myrecon.add_Mirnov(pt, norm, 0.0, 1.0)
+    myrecon.setup_constraints()
+    err_mat = myrecon.eval_error()
+    field_eval = mygs.get_field_eval('B')
+    B_means = []
+    for loc, norm, length, n_avg in finite_probes:
+        B_pts = field_eval.eval(probe_points(loc, norm, length, n_avg))
+        B_means.append(np.mean(np.dot(B_pts, norm)))
+    mp_q.put([{'err_mat': err_mat, 'B_means': np.array(B_means)}])
+
+
+def test_recon_finite_probe():
+    '''Finite-length Mirnov sensors against the mean of the solver's own field over the same points.
+
+    (a) Against point probes at the averaging points (same evaluation path; exact binary points), (b) against
+    `get_field_eval('B')` at the points (about 1E-13 relative, see `test_recon_mse_closed_form`), (c) one averaging
+    point is the point probe exactly, (d) zero length gives the point probe to round-off, and (e) the averaging
+    changes the signal by much more than the bounds.
+    Measured (release build, 2 threads): (a) 0 (bitwise equal); (b) 2.0E-13; (c) and (d) 0; (e) 1.2E-4 to 2.1E-2.
+    Bounds: (a) 1E-15 relative (a few ulp, as the measured difference is zero); (b) 2E-12 relative.
+    '''
+    results = mp_run(run_finite_probe_case, ())
+    assert results is not None
+    err_mat = results[0]['err_mat']
+    B_means = results[0]['B_means']
+    nprobe = len(finite_probes)
+    finite = err_mat[:nprobe, 1]
+    center = err_mat[nprobe:2*nprobe, 1]
+    i = 2*nprobe
+    for j, (loc, norm, length, n_avg) in enumerate(finite_probes[:2]):
+        point_mean = 0.0
+        for val in err_mat[i:i+n_avg, 1]:  # summed in the Fortran order
+            point_mean += val
+        point_mean /= n_avg
+        assert abs(finite[j] - point_mean) <= 1.E-15*abs(point_mean)
+        assert abs(finite[j] - center[j]) > 1.E-6*abs(center[j])
+        i += n_avg
+    assert i == err_mat.shape[0]
+    for j in range(4):
+        assert abs(finite[j] - B_means[j]) <= 2.E-12*abs(B_means[j])
+    assert finite[3] == center[3]
+    assert abs(finite[4] - center[4]) <= 2.3E-16*abs(center[4])
+
+
 #============================================================================
 # Pure Python checks (mocked solver)
 #============================================================================
@@ -286,4 +368,56 @@ def test_recon_mse_rejects_invalid_quantity_in_file(recon):
     with open(recon.con_file, 'w') as stream:
         stream.write('1\n\n13\n 6.0 0.5 0.0\n' + ' 1.0'*9 + '\n 0.0 0.0\n 3\n 0.1 100.0\n\n')
     with pytest.raises(ValueError, match='Invalid MSE quantity'):
+        recon.read_fit_in()
+
+
+def test_recon_finite_probe_round_trip(recon):
+    '''A finite-length Mirnov sensor is written as a type 14 record and read back; a point probe keeps the type 1
+    record of three lines'''
+    from OpenFUSIONToolkit.TokaMaker.reconstruction import Mirnov_con_id, finite_Mirnov_con_id
+    recon.add_Mirnov([6.0, 2.0], [0.6, 0.0, 0.8], 0.25, 0.01)
+    recon.add_Mirnov([6.0, 2.0], [0.6, 0.0, 0.8], 0.25, 0.01, length=-0.125, n_avg=25)
+    recon.write_fit_in()
+    with open(recon.con_file) as stream:
+        lines = stream.read().split('\n')
+    assert int(lines[2]) == Mirnov_con_id
+    assert lines[6] == ''
+    assert int(lines[7]) == finite_Mirnov_con_id
+    assert [float(x) for x in lines[10].split()] == [-0.125, 25]
+    recon.read_fit_in()
+    point, finite = recon._mirnovs
+    assert (point.length, point.n_avg) == (None, None)
+    assert (finite.length, finite.n_avg) == (-0.125, 25)
+    assert finite.loc == (6.0, 2.0)
+    assert finite.norm == (0.6, 0.0, 0.8)
+    assert (finite.val, finite.err) == (0.25, 0.01)
+
+
+@pytest.mark.parametrize('kwargs,match', [
+    ({'length': 0.1}, 'both `length` and `n_avg`'),
+    ({'n_avg': 5}, 'both `length` and `n_avg`'),
+    ({'length': np.nan, 'n_avg': 5}, 'Mirnov length must be finite'),
+    ({'length': [0.1, 0.2], 'n_avg': 5}, r'Mirnov length must have shape \(\)'),
+    ({'length': 0.1, 'n_avg': 0}, 'integer >= 1'),
+    ({'length': 0.1, 'n_avg': 2.5}, 'integer >= 1'),
+    ({'length': 0.1, 'n_avg': True}, 'integer >= 1'),
+    ({'length': True, 'n_avg': 5}, 'Mirnov length must be numeric'),
+    ({'length': 0.1, 'n_avg': 5, 'norm': None}, 'need a normal'),
+    ({'length': 0.1, 'n_avg': 5, 'norm': [0.0, 1.0, 0.0]}, 'nonzero poloidal'),
+    ({'length': 0.1, 'n_avg': 5, 'norm': [np.nan, 0.0, 1.0]}, 'Mirnov normal must be finite'),
+])
+def test_recon_finite_probe_rejects_invalid_input(recon, kwargs, match):
+    '''Invalid finite-length probe input raises ValueError before a constraint is added'''
+    args = {'loc': [6.0, 2.0], 'norm': [1.0, 0.0, 0.0], 'val': 0.25, 'err': 0.01}
+    args.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        recon.add_Mirnov(**args)
+    assert recon._mirnovs == []
+
+
+def test_recon_finite_probe_rejects_invalid_file(recon):
+    '''A finite-length probe record with fewer than one averaging point is rejected'''
+    with open(recon.con_file, 'w') as stream:
+        stream.write('1\n\n14\n 6.0 2.0 0.0\n 1.0 0.0 0.0\n 0.1 0\n 0.25 100.0\n\n')
+    with pytest.raises(ValueError, match='n_avg'):
         recon.read_fit_in()

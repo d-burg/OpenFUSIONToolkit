@@ -61,9 +61,9 @@ MSE_con_id = 13
 finite_Mirnov_con_id = 14
 coil_total_current_con_id = 15
 
-## Format specification for real numbers in the constraint file: 17 significant digits, so every value is read back
-## exactly as it was given
-con_file_real_format = '.16E'
+## Format specification for real numbers in the constraint file (a constant of the file format, not a setting): 17
+## significant digits, so every value is read back exactly as it was given
+CON_FILE_REAL_FORMAT = '.16E'
 
 ## @cond
 def _check_finite(name, value, shape=None):
@@ -210,11 +210,11 @@ class Mirnov_con:
             file.write('{0}\n'.format(Mirnov_con_id))
         else:
             file.write('{0}\n'.format(finite_Mirnov_con_id))
-        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.loc[0], self.loc[1], self.phi, f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.norm[0], self.norm[1], self.norm[2], f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.loc[0], self.loc[1], self.phi, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.norm[0], self.norm[1], self.norm[2], f=CON_FILE_REAL_FORMAT))
         if self.length is not None:
-            file.write(' {0:{f}} {1:d}\n'.format(self.length, self.n_avg, f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+            file.write(' {0:{f}} {1:d}\n'.format(self.length, self.n_avg, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class Ip_con:
@@ -251,7 +251,7 @@ class Ip_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(Ip_con_id))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class fluxLoop_con:
@@ -292,8 +292,8 @@ class fluxLoop_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(fluxLoop_con_id))
-        file.write(' {0:{f}} {1:{f}}\n'.format(self.loc[0], self.loc[1], f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.loc[0], self.loc[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class dFlux_con:
@@ -325,7 +325,7 @@ class dFlux_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(dFlux_con_id))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class Press_con:
@@ -366,8 +366,8 @@ class Press_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(Press_con_id))
-        file.write(' {0:{f}} {1:{f}}\n'.format(self.loc[0], self.loc[1], f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.loc[0], self.loc[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class q_con:
@@ -406,8 +406,8 @@ class q_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(q_con_id))
-        file.write(' {0:E} {1:{f}}\n'.format(self.type, self.loc, f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:E} {1:{f}}\n'.format(self.type, self.loc, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class saddle_con:
@@ -451,10 +451,10 @@ class saddle_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(saddle_con_id))
-        file.write(' {0:{f}} {1:{f}}\n'.format(self.pt1[0], self.pt1[1], f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}}\n'.format(self.pt2[0], self.pt2[1], f=con_file_real_format))
-        file.write(' {0:{f}}\n'.format(self.width, f=con_file_real_format))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.pt1[0], self.pt1[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.pt2[0], self.pt2[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}}\n'.format(self.width, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class coil_current_con:
@@ -502,7 +502,7 @@ class coil_current_con:
         '''
         file.write('{0}\n'.format(coil_total_current_con_id if self.total else coil_current_con_id))
         file.write(' {0}\n'.format(self.ind+1))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class MSE_con:
@@ -586,11 +586,11 @@ class MSE_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(MSE_con_id))
-        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.loc[0], self.loc[1], self.phi, f=con_file_real_format))
-        file.write(' ' + ' '.join('{0:{f}}'.format(c, f=con_file_real_format) for c in self.coefs) + '\n')
-        file.write(' {0:{f}} {1:{f}}\n'.format(self.E_R, self.E_Z, f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.loc[0], self.loc[1], self.phi, f=CON_FILE_REAL_FORMAT))
+        file.write(' ' + ' '.join('{0:{f}}'.format(c, f=CON_FILE_REAL_FORMAT) for c in self.coefs) + '\n')
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.E_R, self.E_Z, f=CON_FILE_REAL_FORMAT))
         file.write(' {0:d}\n'.format(MSE_con.quantities[self.quantity]))
-        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 con_map = {

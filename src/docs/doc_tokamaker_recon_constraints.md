@@ -38,13 +38,24 @@ the plasma).
 | Diamagnetic flux (8) | `set_DFlux` | \f$ \int_{plasma} (B_\phi - F_0/R)\, dA \f$ [Wb] |
 | Pressure (9) | `add_pressure` | \f$ p(\psi(R, Z)) \f$ [Pa] |
 | Saddle loop (11) | `add_saddle` | \f$ -(\psi_1 - \psi_2) \Delta\phi \f$ for legs 1 and 2 and toroidal width \f$ \Delta\phi \f$ [Wb] |
-| Coil current (12) | `set_coil_currents` | coil current [A] set for the coil, without the virtual vertical stability coil share |
+| Coil current (12) | `set_coil_currents` | coil current [A], without the virtual vertical stability coil share |
+| Coil total current (15) | `set_coil_currents(..., total=True)` | total coil current [A] as returned by `get_coil_currents()` (below) |
 | MSE (13) | `add_MSE` | \f$ \tan \gamma \f$ or \f$ \gamma \f$ (below) |
 
 **Flux sign.** Since \f$ B_Z = \frac{1}{R}\frac{\partial \psi}{\partial R} \f$ here, while COCOS 11 has
 \f$ B_Z = -\frac{1}{2\pi R}\frac{\partial \psi_{11}}{\partial R} \f$ with \f$ \psi_{11} \f$ per full turn, a flux loop signal in
 the COCOS 11 convention is \f$ \psi_{11} = -2\pi\psi \f$: it enters a flux loop constraint with the opposite sign.
 Field components, currents and the diamagnetic flux are physical quantities and need no conversion between the two.
+
+**Coil currents.** By default (type 12) the modeled current of a coil set is its own current, without its share of
+the virtual vertical stability coil (`set_coil_vsc`). With `total=True` (type 15) it is the total that
+`get_coil_currents()` returns and that a coil current measurement sees. The virtual coil amplitude is set by each
+equilibrium solve, including the solves inside `reconstruct()` with `fitCoils`, which varies the coil currents
+themselves; for a coil that carries a virtual coil share, a total-current constraint therefore does not determine the
+split between the coil's own current and that share. In the ITER reconstruction test (Fortran driver, `fitCoils`)
+with total-current constraints, the vertical stability coil's own current goes from 0.146 MA to 1.14 MA, against a
+virtual coil share of -0.998 MA, with the same fit quality and the global quantities within 2.2E-4 relative, and
+`reconstruct()` takes 1.7 to 1.8 times as long. Constraints may be given for any subset of the coil sets.
 
 ## Finite-length Mirnov sensors
 For a signed length \f$ L \f$ and \f$ n_{avg} \f$ points, the averaging points lie at offsets
@@ -96,6 +107,6 @@ value and the weight).
 | 7, 9 | `R Z` / `value weight` (pressure at the magnetic axis for `R < 0`) |
 | 10 | `type psi_N` / `value weight` |
 | 11 | `R1 Z1` / `R2 Z2` / `width` / `value weight` |
-| 12 | `coil index (1-based)` / `value weight` |
+| 12, 15 | `coil index (1-based)` / `value weight` |
 | 13 | `R Z phi` / `c_0 ... c_8` / `E_R E_Z` / `quantity (1: tan gamma, 2: gamma)` / `value weight` |
 | 14 | `R Z phi` / `n_R n_phi n_Z` / `L n_avg` / `value weight` |

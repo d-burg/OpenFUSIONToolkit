@@ -354,6 +354,111 @@ def test_recon_offmesh_and_use():
     assert results[0]['use_read'] == [True, False, True, True, False, True, True, True, False, True]
 
 
+def run_coil_case(mp_q):
+    mygs, _ = solve_ITER_reference(1.0, 2)
+    if mygs is None:
+        mp_q.put(None)
+        return
+    myrecon = reconstruction(mygs)
+    currents, _ = mygs.get_coil_currents()
+    names = list(mygs.coil_sets)
+    subset = [name for i, name in enumerate(names) if (i % 3 == 0) or (name == 'VS')]
+    myrecon.set_coil_currents({name: currents[name] + 1.0E3 for name in subset}, {name: 1.0E3 for name in subset},
+                              total=True)
+    myrecon.setup_constraints()
+    err_mat = myrecon.eval_error()
+    # Without the virtual vertical stability coil the totals change only for the coils it acts through
+    mygs.set_coil_vsc({'VS': 0.0})
+    currents_novsc, _ = mygs.get_coil_currents()
+    err_mat_novsc = myrecon.eval_error()
+    mp_q.put([{'subset': subset, 'currents': currents, 'currents_novsc': currents_novsc, 'err_mat': err_mat,
+               'err_mat_novsc': err_mat_novsc, 'ind': [con.ind for con in myrecon._coil_current_cons],
+               'ids': {name: mygs.coil_sets[name]['id'] for name in subset}}])
+
+
+def test_recon_coil_total_current():
+    '''A total current constraint models the coil's total current exactly as `get_coil_currents()` returns it,
+    including the share of the virtual vertical stability coil (nonzero for the VS coil of the ITER reference
+    equilibrium: measured 1.5E-3 A of 1.5E5 A, so the comparison is bitwise), and constraints can be set for a subset
+    of the coil sets'''
+    results = mp_run(run_coil_case, ())
+    assert results is not None
+    res = results[0]
+    subset = res['subset']
+    assert res['ind'] == [res['ids'][name] for name in subset]
+    assert res['err_mat'].shape[0] == len(subset) < len(res['currents'])
+    for err_mat, currents in ((res['err_mat'], res['currents']), (res['err_mat_novsc'], res['currents_novsc'])):
+        for i, name in enumerate(subset):
+            assert err_mat[i, 1] == currents[name]
+            assert err_mat[i, 0] == (err_mat[i, 1] - err_mat[i, 2])*1.E-3
+    assert res['currents']['VS'] != res['currents_novsc']['VS']
+    assert all(res['currents'][name] == res['currents_novsc'][name] for name in subset if name != 'VS')
+
+
+def run_coil_legacy_case(mp_q):
+    '''The Fortran-driver ITER reconstruction test (`fitCoils`, coil current constraints in the default form, virtual
+    vertical stability coil active), then coil current rows of both forms evaluated on its end state'''
+    import test_TokaMaker_ITER_recon as recon_test
+    kept = {}
+
+    def solve_and_keep(*args):
+        kept['gs'], EQ_obj = solve_ITER_reference(*args)
+        return kept['gs'], EQ_obj
+
+    class _Queue:
+        def put(self, value):
+            kept['result'] = value
+
+    # Keep the coil current targets the test gives its constraints
+    set_coil_currents = reconstruction.set_coil_currents
+
+    def set_and_keep(self, targets, errs, *args, **kwargs):
+        kept['targets'] = dict(targets)
+        return set_coil_currents(self, targets, errs, *args, **kwargs)
+
+    recon_test.solve_ITER_reference = solve_and_keep
+    reconstruction.set_coil_currents = set_and_keep
+    try:
+        recon_test.run_ITER_recon_case(1.0, 2, 'recon_legacy', _Queue())
+    finally:
+        reconstruction.set_coil_currents = set_coil_currents
+    if (kept.get('gs') is None) or (kept.get('result') is None):
+        mp_q.put(None)
+        return
+    mygs = kept['gs']
+    totals, _ = mygs.get_coil_currents()
+    myrecon = reconstruction(mygs)
+    names = list(mygs.coil_sets)
+    err_mats = {}
+    for total in (False, True):
+        myrecon.set_coil_currents({name: 0.0 for name in names}, {name: 1.0E3 for name in names}, total=total)
+        myrecon.setup_constraints()
+        err_mats[total] = myrecon.eval_error()
+    mygs.set_coil_vsc({'VS': 0.0})
+    raws, _ = mygs.get_coil_currents()
+    mp_q.put([{'names': names, 'totals': totals, 'raws': raws, 'err_mats': err_mats, 'targets': kept['targets']}])
+
+
+def test_recon_coil_default_and_total():
+    '''On the end state of the Fortran-driver ITER reconstruction test, where the virtual vertical stability coil
+    carries a large share of the VS coil current, the default coil current row equals the coil's own current and the
+    total current row equals `get_coil_currents()` (bitwise, the same expressions); and the default constraint keeps
+    the fitted current of the VS coil itself at its constraint target.
+    Measured (release build, 2 threads): VS virtual coil share 1.0E3 A of 1.46E5 A; VS coil current 2.2E-7 relative
+    from its target; with total-current constraints it would be 1.14E6 A, 6.9 times the target away.
+    Bound: 1 % of the target (the tolerance of the ITER reconstruction tests; a fitted value is not expected to be
+    reproduced more closely than that across compilers and platforms).
+    '''
+    results = mp_run(run_coil_legacy_case, ())
+    assert results is not None
+    res = results[0]
+    assert abs(res['totals']['VS'] - res['raws']['VS']) > 1.E2
+    for i, name in enumerate(res['names']):
+        assert res['err_mats'][False][i, 1] == res['raws'][name]
+        assert res['err_mats'][True][i, 1] == res['totals'][name]
+    assert abs(res['raws']['VS'] - res['targets']['VS']) <= 1.E-2*abs(res['targets']['VS'])
+
+
 #============================================================================
 # Pure Python checks (mocked solver)
 #============================================================================
@@ -640,3 +745,56 @@ def test_recon_add_saddle(recon, use):
     restored = recon._saddles[0]
     assert (restored.pt1, restored.pt2, restored.width) == ((6.0, 0.5), (6.5, 1.0), 0.25)
     assert (restored.val, restored.err, restored.use) == (0.125, 0.0125, use)
+
+
+def test_recon_coil_subset_round_trip(recon):
+    '''Coil current constraints for a subset of the coil sets keep the coil set order and survive the file'''
+    recon.set_coil_currents({'VS': 5.0E3, 'PF1': 1.0E3}, {'VS': 50.0, 'PF1': 10.0})
+    recon.write_fit_in()
+    recon.read_fit_in()
+    restored = recon._coil_current_cons
+    assert [(con.ind, con.val, con.err) for con in restored] == [(0, 1.0E3, 10.0), (2, 5.0E3, 50.0)]
+    recon.set_coil_currents({}, {})
+    assert recon._coil_current_cons == []
+
+
+@pytest.mark.parametrize('total', [False, True])
+def test_recon_coil_total_round_trip(recon, total):
+    '''Coil current constraints are written as type 12 records by default and as type 15 (total current) records with
+    `total=True`, and read back in the same form'''
+    from OpenFUSIONToolkit.TokaMaker.reconstruction import coil_current_con_id, coil_total_current_con_id
+    recon.set_coil_currents({'VS': 5.0E3, 'PF2': -1.0E3}, {'VS': 50.0, 'PF2': 10.0}, use={'VS': False}, total=total)
+    recon.write_fit_in()
+    with open(recon.con_file) as stream:
+        lines = stream.read().split('\n')
+    record_id = coil_total_current_con_id if total else coil_current_con_id
+    assert [int(lines[2]), int(lines[3])] == [record_id, 2]
+    assert [int(lines[6]), int(lines[7])] == [record_id, 3]
+    recon.read_fit_in()
+    restored = recon._coil_current_cons
+    assert [(con.ind, con.val, con.err, con.use, con.total) for con in restored] == [
+        (1, -1.0E3, 10.0, True, total), (2, 5.0E3, 50.0, False, total)]
+
+
+@pytest.mark.parametrize('targets,errs,kwargs,exc,match', [
+    ({'CS1': 1.0}, {'CS1': 1.0}, {}, KeyError, 'Unknown coil set'),
+    ({'PF1': 1.0, 'PF2': 1.0}, {'PF1': 1.0}, {}, KeyError, 'Missing coil current error'),
+    ({'PF1': np.nan}, {'PF1': 1.0}, {}, ValueError, 'must be finite'),
+    ({'PF1': True}, {'PF1': 1.0}, {}, ValueError, 'must be numeric'),
+    ({'PF1': 1.0}, {'PF1': 0.0}, {}, ValueError, 'Error must be positive'),
+    ({'PF1': 1.0}, {'PF1': np.inf}, {}, ValueError, 'Error must be finite'),
+    ({'PF1': 1.0}, {'PF1': 1.0}, {'use': {'PF1': 1}}, ValueError, '`use` must be True or False'),
+    ({'PF1': 1.0}, {'PF1': 1.0}, {'total': 1}, ValueError, '`total` must be True or False'),
+])
+def test_recon_coil_rejects_invalid_input(recon, targets, errs, kwargs, exc, match):
+    '''Invalid coil current targets, errors or flags are rejected and leave the existing constraints unchanged'''
+    recon.set_coil_currents({'VS': 1.0E3}, {'VS': 10.0})
+    with pytest.raises(exc, match=match):
+        recon.set_coil_currents(targets, errs, **kwargs)
+    assert [(con.ind, con.val) for con in recon._coil_current_cons] == [(2, 1.0E3)]
+
+
+def test_recon_coil_extra_errors_ignored(recon):
+    '''Errors given for coil sets without a target are ignored, as before coil subsets were allowed'''
+    recon.set_coil_currents({'PF1': 1.0E3}, {'PF1': 10.0, 'PF2': 20.0, 'CS1': 5.0})
+    assert [(con.ind, con.val, con.err) for con in recon._coil_current_cons] == [(0, 1.0E3, 10.0)]

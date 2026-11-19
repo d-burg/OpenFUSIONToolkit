@@ -8,6 +8,7 @@ configure_file( test_TokaMaker_ITER_recon.py ${CMAKE_CURRENT_BINARY_DIR} COPYONL
 configure_file( test_TokaMaker_LTX.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_bootstrap.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_bootstrap_internal.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
+configure_file( test_TokaMaker_bootstrap_eval.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_sawtooth.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_torflux.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_xpoint_cut.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

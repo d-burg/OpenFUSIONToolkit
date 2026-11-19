@@ -391,6 +391,8 @@ def test_recon_coil_total_current():
         for i, name in enumerate(subset):
             assert err_mat[i, 1] == currents[name]
             assert err_mat[i, 0] == (err_mat[i, 1] - err_mat[i, 2])*1.E-3
+            # The solver reads the target exactly as given (full-precision constraint file)
+            assert err_mat[i, 2] == res['currents'][name] + 1.0E3
     assert res['currents']['VS'] != res['currents_novsc']['VS']
     assert all(res['currents'][name] == res['currents_novsc'][name] for name in subset if name != 'VS')
 
@@ -437,11 +439,12 @@ def test_recon_coil_default_and_total():
     '''On the end state of the Fortran-driver ITER reconstruction test, where the virtual vertical stability coil
     carries a large share of the VS coil current, the default coil current row equals the coil's own current and the
     total current row equals `get_coil_currents()` (bitwise, the same expressions); and the default constraint leaves
-    the fitted coil state as on the main branch.
-    Measured (release build): VS virtual coil share 1.0E3 A of 1.46E5 A; VS coil current equal to the main-branch value
-    (bitwise, 2 threads). On main that value is the same in three repeats at 2 threads and differs by up to 1.1E-11
-    relative at 1 and 4 threads; with total-current constraints it would be 1.14E6 A.
-    Bound: 1E-10 relative (about 10 times the thread-count spread).
+    the fitted coil state as on the main branch, apart from the effect of the full-precision constraint file.
+    Measured (release build): VS virtual coil share 1.0E3 A of 1.46E5 A; VS coil current 1.9E-7 relative above the
+    main-branch value (2 threads; equal to it bitwise with the 7-digit file). On main that value is the same in three
+    repeats at 2 threads and differs by up to 1.1E-11 relative at 1 and 4 threads; with total-current constraints it
+    would be 1.14E6 A.
+    Bound: 2E-6 relative (about 10 times the measured full-precision effect).
     '''
     results = mp_run(run_coil_legacy_case, ())
     assert results is not None
@@ -450,7 +453,7 @@ def test_recon_coil_default_and_total():
     for i, name in enumerate(res['names']):
         assert res['err_mats'][False][i, 1] == res['raws'][name]
         assert res['err_mats'][True][i, 1] == res['totals'][name]
-    assert abs(res['raws']['VS'] - vs_coil_current_main) <= 1.E-10*abs(vs_coil_current_main)
+    assert abs(res['raws']['VS'] - vs_coil_current_main) <= 2.E-6*abs(vs_coil_current_main)
 
 
 #============================================================================
@@ -787,3 +790,46 @@ def test_recon_coil_rejects_invalid_input(recon, targets, errs, kwargs, exc, mat
     with pytest.raises(exc, match=match):
         recon.set_coil_currents(targets, errs, **kwargs)
     assert [(con.ind, con.val) for con in recon._coil_current_cons] == [(2, 1.0E3)]
+
+
+def test_recon_full_precision_round_trip(recon):
+    '''Every real number in the constraint file is written with 17 significant digits, so values read back bitwise
+    (errors, stored as weights 1/err, to within one rounding of the reciprocal)'''
+    third = 1.0/3.0
+    loc = [6.0 + third, 0.1 + 0.2]
+    norm = [np.sqrt(0.5), 0.0, -np.sqrt(0.5)]
+    recon.add_flux_loop(loc, np.pi, third*1.E-2)
+    recon.add_Mirnov(loc, norm, -np.e, 0.07, length=-third, n_avg=7)
+    recon.add_saddle(loc, [loc[0] + third, loc[1]], np.pi/7.0, third, 0.11)
+    recon.add_pressure(loc, 1.0E5/7.0, third*1.E2)
+    recon.set_coil_currents({'PF2': -1.0E6/7.0}, {'PF2': 1.0E3/3.0})
+    recon.set_Ip(1.5E7/7.0, 1.0E5/3.0)
+    recon.set_DFlux(-0.1/7.0, 0.003)
+    recon.add_MSE(loc, [c + third for c in mse_coef_sets[1]], 0.1/3.0, 0.07, E_R=4.0E4/7.0, E_Z=-third)
+    written = [dict(vars(con)) for con in recon.get_constraints()]
+    recon.write_fit_in()
+    with open(recon.con_file) as stream:
+        assert '6.3333333333333330E+00' in stream.read()
+    recon.read_fit_in()
+    restored = [dict(vars(con)) for con in recon.get_constraints()]
+    assert len(restored) == len(written) == 8
+    for con_in, con_out in zip(written, restored):
+        for key, value in con_in.items():
+            if key == 'err':
+                assert con_out[key] == pytest.approx(value, rel=4.5E-16, abs=0.0)
+            elif key in ('loc', 'norm', 'pt1', 'pt2', 'coefs'):
+                assert tuple(con_out[key]) == tuple(value)
+            else:
+                assert con_out[key] == value
+
+
+def test_recon_reads_old_precision_file(recon):
+    '''Constraint files written with the earlier 7-digit format are read as before'''
+    with open(recon.con_file, 'w') as stream:
+        stream.write('2\n\n7\n 6.333333E+00 3.000000E-01\n 3.141593E+00 3.000000E+02\n\n'
+                     '1\n 6.333333E+00 3.000000E-01 0.000000E+00\n 1.000000E+00 0.000000E+00 0.000000E+00\n'
+                     ' 2.500000E-01 1.000000E+02\n\n')
+    recon.read_fit_in()
+    assert recon._flux_loops[0].loc == (6.333333, 0.3)
+    assert recon._flux_loops[0].val == 3.141593
+    assert recon._mirnovs[0].err == 0.01

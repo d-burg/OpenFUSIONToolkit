@@ -1388,16 +1388,17 @@ FUNCTION fit_coil_error(self,gs) RESULT(err)
 CLASS(coil_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: err !< Needs docs
-err = (gs%coil_currs(self%coil)/mu0 - self%val)*self%wt
+err = (self%eval(gs) - self%val)*self%wt
 END FUNCTION fit_coil_error
 !---------------------------------------------------------------------------------
-!> Needs Docs
+!> Evaluate coil current constraint: the coil's total current [A], including the share of the virtual
+!! vertical stability coil (the quantity returned by `tokamaker_get_coil_currents`)
 !---------------------------------------------------------------------------------
 FUNCTION fit_coil_eval(self,gs) RESULT(val)
 CLASS(coil_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
-val = gs%coil_currs(self%coil)/mu0
+val = (gs%coil_currs(self%coil) + gs%device%coil_vcont(self%coil)*gs%vcontrol_val)/mu0
 END FUNCTION fit_coil_eval
 !---------------------------------------------------------------------------------
 !> Needs Docs

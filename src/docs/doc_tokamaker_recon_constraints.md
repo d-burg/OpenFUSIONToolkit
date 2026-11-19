@@ -36,13 +36,18 @@ the plasma).
 | Diamagnetic flux (8) | `set_DFlux` | \f$ \int_{plasma} (B_\phi - F_0/R)\, dA \f$ [Wb] |
 | Pressure (9) | `add_pressure` | \f$ p(\psi(R, Z)) \f$ [Pa] |
 | Saddle loop (11) | `add_saddle` | \f$ -(\psi_1 - \psi_2) \Delta\phi \f$ for legs 1 and 2 and toroidal width \f$ \Delta\phi \f$ [Wb] |
-| Coil current (12) | `set_coil_currents` | coil current [A] set for the coil, without the virtual vertical stability coil share |
+| Coil current (12) | `set_coil_currents` | total coil current [A] as returned by `get_coil_currents()` (below) |
 | MSE (13) | `add_MSE` | \f$ \tan \gamma \f$ or \f$ \gamma \f$ (below) |
 
 **Flux sign.** Since \f$ B_Z = \frac{1}{R}\frac{\partial \psi}{\partial R} \f$ here, while COCOS 11 (IMAS) has
 \f$ B_Z = -\frac{1}{2\pi R}\frac{\partial \psi_{11}}{\partial R} \f$ with \f$ \psi_{11} \f$ per full turn, a flux loop signal in
 the COCOS 11 convention is \f$ \psi_{11} = -2\pi\psi \f$: it enters a flux loop constraint with the opposite sign.
 Field components, currents and the diamagnetic flux are physical quantities and need no conversion between the two.
+
+**Coil currents.** The modeled current of a coil set is its current plus its share of the virtual vertical
+stability coil (`set_coil_vsc`), the total that `get_coil_currents()` returns and that a coil current measurement
+sees. The virtual coil amplitude is set by each equilibrium solve, including the solves inside `reconstruct()` with
+`fitCoils`, which varies the coil currents themselves. Constraints may be given for any subset of the coil sets.
 
 ## Finite-length Mirnov sensors
 For a signed length \f$ L \f$ and \f$ n_{avg} \f$ points, the averaging points lie at offsets

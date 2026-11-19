@@ -449,7 +449,11 @@ class saddle_con:
 
 
 class coil_current_con:
-    '''! TokaMaker equilibrium reconstruction coil current constraint'''
+    '''! TokaMaker equilibrium reconstruction coil current constraint
+
+    The modeled signal is the coil set's total current [A] as returned by `get_coil_currents()`, including its share of
+    the virtual vertical stability coil.
+    '''
     def __init__(self, ind=None, val=None, err=None, use=True):
         '''! Create coil current constraint
 
@@ -759,22 +763,30 @@ class reconstruction():
     def set_coil_currents(self,targets,errs,use=None):
         '''! Set coil current constraints
 
-        @param targets Dictionary of coil current targets
-        @param errs Dictionary of coil current constraint errors
+        The constrained quantity is each coil set's total current, as returned by `get_coil_currents()` (including the
+        share of the virtual vertical stability coil). Coil sets without a target are not constrained.
+
+        @param targets Dictionary of coil current targets [A] by coil set name (any subset of the coil sets)
+        @param errs Dictionary of coil current constraint errors [A] (one for every target)
         @param use Dictionary of used flags by coil set (default: all used); an unused constraint is evaluated but has
         zero weight
         '''
         if use is None:
             use = {}
+        for name in targets:
+            if name not in self._tMaker_obj.coil_sets:
+                raise KeyError(f"Unknown coil set '{name}'")
+            if name not in errs:
+                raise KeyError(f"Missing coil current error for coil set '{name}'")
+            _check_finite(f"Coil current target for '{name}'", targets[name], ())
+            _check_error(errs[name])
         for name in use:
             if name not in targets:
                 raise KeyError(f"Used flag given for coil set '{name}' without a coil current target")
         self._coil_current_cons = []
         for name, coil_set in self._tMaker_obj.coil_sets.items():
             if name not in targets:
-                raise KeyError(f"Missing coil current target for coil set '{name}'")
-            if name not in errs:
-                raise KeyError(f"Missing coil current error for coil set '{name}'")
+                continue
             self._coil_current_cons.append(coil_current_con(ind=coil_set['id'], val=targets[name], err=errs[name],
                                                             use=use.get(name, True)))
 

@@ -8,6 +8,10 @@
 import contextlib
 import ctypes
 import io
+import json
+import threading
+import time
+import warnings
 from unittest.mock import Mock
 
 import numpy as np
@@ -25,6 +29,17 @@ mse_coef_sets = [
 ]
 # Electric field (E_R, E_Z) [V/m]: off, and on with a size that changes tan(gamma) by several percent
 mse_efields = [(0.0, 0.0), (4.0E4, -1.5E4)]
+
+
+def _preflight(test, values):
+    '''Throwaway pre-flight diagnostic: emit every compared value as a warning (printed in the test log summary)'''
+    warnings.warn('PREFLIGHT ' + json.dumps({'test': test, 'values': values}, sort_keys=True,
+                                            default=lambda o: o.tolist() if hasattr(o, 'tolist') else str(o)))
+
+
+def _rdiff(a, b):
+    '''|a - b|/|b| (|a - b| if b = 0)'''
+    return float(abs(a - b)/abs(b)) if b != 0 else float(abs(a - b))
 
 
 def mse_formula(B, coefs, E_R, E_Z):
@@ -88,6 +103,31 @@ def test_recon_mse_closed_form():
     Bounds: (a) 1E-15 (a few ulp, as the measured difference is zero); (b) 1E-12.
     '''
     results = mp_run(run_mse_case, ())
+    if results is not None:
+        err_mat = results[0]['err_mat']
+        B_eval = results[0]['B_eval']
+        npts = mse_points.shape[0]
+        B_fit = err_mat[:3*npts, 1].reshape((npts, 3))
+        diag = {'rel_fit': [], 'rel_eval': [], 'werr_diff': [], 'val_diff': [], 'col3': [], 'model': []}
+        for i, (ipt, icoef, ie, quantity) in enumerate(mse_cases()):
+            row = err_mat[3*npts+i, :]
+            tan_fit = mse_formula(B_fit[ipt, :], mse_coef_sets[icoef], *mse_efields[ie])
+            tan_eval = mse_formula(B_eval[ipt, :], mse_coef_sets[icoef], *mse_efields[ie])
+            if quantity == 'tan':
+                ref_fit, ref_eval, val = tan_fit, tan_eval, 0.1
+            else:
+                ref_fit, ref_eval, val = np.arctan(tan_fit), np.arctan(tan_eval), -0.2
+            diag['rel_fit'].append(_rdiff(row[1], ref_fit))
+            diag['rel_eval'].append(_rdiff(row[1], ref_eval))
+            diag['werr_diff'].append(float(row[0] - (val - row[1])*100.0))
+            diag['val_diff'].append(float(row[2] - val))
+            diag['col3'].append(float(row[3]))
+            diag['model'].append(float(row[1]))
+        diag['max_rel_fit'] = max(diag['rel_fit'])
+        diag['max_rel_eval'] = max(diag['rel_eval'])
+        _preflight('recon_mse_closed_form', diag)
+    else:
+        _preflight('recon_mse_closed_form', None)
     assert results is not None
     err_mat = results[0]['err_mat']
     B_eval = results[0]['B_eval']
@@ -125,7 +165,17 @@ mse_shift = 2  # MSE chord whose datum is displaced
 
 
 def run_mse_reconstruct_case(mp_q):
+    # Pre-flight diagnostic: elapsed time markers and a heartbeat every 5 s (interleaved with the solver output)
+    t_start = time.time()
+    beat_stop = threading.Event()
+
+    def heartbeat():
+        while not beat_stop.wait(5.0):
+            print('PREFLIGHT_HEARTBEAT t = {0:.1f} s'.format(time.time() - t_start), flush=True)
+    threading.Thread(target=heartbeat, daemon=True).start()
     mygs, _ = solve_ITER_reference(1.0, 2)
+    t_ref = time.time() - t_start
+    print('PREFLIGHT_TIME reference solve {0:.3f} s'.format(t_ref), flush=True)
     if mygs is None:
         mp_q.put(None)
         return
@@ -162,13 +212,19 @@ def run_mse_reconstruct_case(mp_q):
                                ('unused', all_rows, (mse_shift,)), ('with', all_rows, ())):
         mygs.replace_eq(eq_start)
         set_data(mse_data, rows, unused)
+        print('PREFLIGHT_TIME fit {0} start at {1:.3f} s'.format(case, time.time() - t_start), flush=True)
+        t_fit = time.time()
         flag = myrecon.reconstruct(maxits=20)
+        t_fit = time.time() - t_fit
+        print('PREFLIGHT_TIME fit {0} done in {1:.3f} s, flag {2}'.format(case, t_fit, flag), flush=True)
         fit_out = np.loadtxt(myrecon.out_file)
         # All chords evaluated on the fitted equilibrium
         set_data(mse_data, all_rows)
         myrecon.setup_constraints()
-        fits[case] = {'flag': flag, 'fit_out': fit_out, 'err_mat': myrecon.eval_error()}
-    mp_q.put([{'fits': fits, 'mse_data': mse_data}])
+        fits[case] = {'flag': flag, 'fit_out': fit_out, 'err_mat': myrecon.eval_error(), 'time_s': t_fit,
+                      'o_point': [float(v) for v in mygs.o_point]}
+    beat_stop.set()
+    mp_q.put([{'fits': fits, 'mse_data': mse_data, 'time_ref_s': t_ref, 'time_total_s': time.time() - t_start}])
 
 
 def test_recon_mse_in_reconstruct():
@@ -183,7 +239,23 @@ def test_recon_mse_in_reconstruct():
     Bounds: unused against without 1E-15 relative (a few ulp, as the measured difference is zero); table 3E-12
     relative.
     '''
-    results = mp_run(run_mse_reconstruct_case, ())
+    t0 = time.time()
+    results = mp_run(run_mse_reconstruct_case, (), timeout=300)  # pre-flight diagnostic: 300 s instead of 30 s
+    diag = {'wall_s': time.time() - t0, 'finished': results is not None}
+    if results is not None:
+        fits, mse_data = results[0]['fits'], results[0]['mse_data']
+        row = len(mse_flux_pts) + 1 + mse_shift
+        diag['time_ref_s'] = results[0]['time_ref_s']
+        diag['time_total_s'] = results[0]['time_total_s']
+        for case, fit in fits.items():
+            diag[case] = {'flag': fit['flag'], 'time_s': fit['time_s'], 'o_point': fit['o_point'],
+                          'dist': float(abs(fit['err_mat'][row, 1] - mse_data[mse_shift])),
+                          'model_row': float(fit['err_mat'][row, 1])}
+        mw, mu = fits['without']['err_mat'][:, 1], fits['unused']['err_mat'][:, 1]
+        diag['unused_vs_without_rel'] = [_rdiff(u, w) for u, w in zip(mu, mw)]
+        fo, em = fits['with']['fit_out'], fits['with']['err_mat']
+        diag['table_rel'] = _rdiff(fo[row, 2], em[row, 1])
+    _preflight('recon_mse_in_reconstruct', diag)
     assert results is not None
     fits, mse_data = results[0]['fits'], results[0]['mse_data']
     row = len(mse_flux_pts) + 1 + mse_shift
@@ -257,6 +329,25 @@ def test_recon_finite_probe():
     Bounds: (a) 1E-15 relative (a few ulp, as the measured difference is zero); (b) 2E-12 relative.
     '''
     results = mp_run(run_finite_probe_case, ())
+    diag = None
+    if results is not None:
+        err_mat, B_means = results[0]['err_mat'], results[0]['B_means']
+        nprobe = len(finite_probes)
+        finite, center = err_mat[:nprobe, 1], err_mat[nprobe:2*nprobe, 1]
+        diag = {'point_mean_rel': [], 'avg_effect_rel': []}
+        i = 2*nprobe
+        for j, (loc, norm, length, n_avg) in enumerate(finite_probes[:2]):
+            point_mean = 0.0
+            for val in err_mat[i:i+n_avg, 1]:
+                point_mean += val
+            point_mean /= n_avg
+            diag['point_mean_rel'].append(_rdiff(finite[j], point_mean))
+            diag['avg_effect_rel'].append(_rdiff(finite[j], center[j]))
+            i += n_avg
+        diag['field_eval_rel'] = [_rdiff(finite[j], B_means[j]) for j in range(4)]
+        diag['n1_diff'] = float(finite[3] - center[3])
+        diag['zero_length_rel'] = _rdiff(finite[4], center[4])
+    _preflight('recon_finite_probe', diag)
     assert results is not None
     err_mat = results[0]['err_mat']
     B_means = results[0]['B_means']
@@ -332,6 +423,15 @@ def test_recon_offmesh_and_use():
     node), still evaluated at that node; unused constraints have zero weighted error and the same modeled signal as
     their used twins, and the flag survives the constraint file; locating before setup returns an error'''
     results = mp_run(run_offmesh_case, ())
+    diag = None
+    if results is not None:
+        res, em = results[0], results[0]['err_mat']
+        diag = {'locate_flag': res['locate_flag'], 'projected': res['projected'],
+                'dist_rel': [_rdiff(e[2], res['dist_finite'] if e[0] == 6 else res['dist']) for e in res['projected']],
+                'node_flux_rel': _rdiff(em[2, 1], 2.0*np.pi*res['psi_node']),
+                'unused_model_diff': [float(em[u, 1] - em[s, 1]) for s, u in ((0, 1), (3, 4))],
+                'unused_werr': [float(em[u, 0]) for u in (1, 4, 8)], 'use_read': res['use_read']}
+    _preflight('recon_offmesh_and_use', diag)
     assert results is not None
     assert results[0]['locate_flag'] == -102
     err_mat = results[0]['err_mat']
@@ -382,6 +482,17 @@ def test_recon_coil_total_current():
     equilibrium: measured 1.5E-3 A of 1.5E5 A, so the comparison is bitwise), and constraints can be set for a subset
     of the coil sets'''
     results = mp_run(run_coil_case, ())
+    diag = None
+    if results is not None:
+        res = results[0]
+        diag = {'model_vs_get_coil_currents_rel': [], 'werr_diff': [], 'target_diff': []}
+        for err_mat, currents in ((res['err_mat'], res['currents']), (res['err_mat_novsc'], res['currents_novsc'])):
+            for i, name in enumerate(res['subset']):
+                diag['model_vs_get_coil_currents_rel'].append(_rdiff(err_mat[i, 1], currents[name]))
+                diag['werr_diff'].append(float(err_mat[i, 0] - (err_mat[i, 1] - err_mat[i, 2])*1.E-3))
+                diag['target_diff'].append(float(err_mat[i, 2] - (res['currents'][name] + 1.0E3)))
+        diag['VS'] = [float(res['currents']['VS']), float(res['currents_novsc']['VS'])]
+    _preflight('recon_coil_total_current', diag)
     assert results is not None
     res = results[0]
     subset = res['subset']
@@ -451,7 +562,18 @@ def test_recon_coil_default_and_total():
     Bound: 1 % of the target (the tolerance of the ITER reconstruction tests; a fitted value is not expected to be
     reproduced more closely than that across compilers and platforms).
     '''
+    t0 = time.time()
     results = mp_run(run_coil_legacy_case, ())
+    diag = {'wall_s': time.time() - t0}
+    if results is not None:
+        res = results[0]
+        diag['default_vs_raw_rel'] = [_rdiff(res['err_mats'][False][i, 1], res['raws'][name])
+                                      for i, name in enumerate(res['names'])]
+        diag['total_vs_totals_rel'] = [_rdiff(res['err_mats'][True][i, 1], res['totals'][name])
+                                       for i, name in enumerate(res['names'])]
+        diag['VS'] = {'total': float(res['totals']['VS']), 'raw': float(res['raws']['VS']),
+                      'target': float(res['targets']['VS'])}
+    _preflight('recon_coil_default_and_total', diag)
     assert results is not None
     res = results[0]
     assert abs(res['totals']['VS'] - res['raws']['VS']) > 1.E2

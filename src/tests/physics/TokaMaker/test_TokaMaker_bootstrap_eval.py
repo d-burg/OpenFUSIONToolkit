@@ -6,6 +6,9 @@
 # TokaMaker tests: eval_bootstrap (the internal solver's bootstrap evaluation on a given equilibrium) against the
 # Redl formula of bootstrap.py, its options, and the evaluation inside solve_bootstrap, on ITER
 import os
+import json
+import time
+import warnings
 import pytest
 import numpy as np
 from tokamaker_testing import mp_run, setup_ITER_bootstrap_internal
@@ -61,6 +64,25 @@ def _python_bootstrap(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None, ln_lambda='NRL',
             'ln_lambda_min': float(min(np.min(ln_le), np.min(ln_lii)))}
 
 
+def _preflight(test, values):
+    '''Throwaway pre-flight diagnostic: emit every compared value as a warning (printed in the test log summary)'''
+    warnings.warn('PREFLIGHT ' + json.dumps({'test': test, 'values': values}, default=str, sort_keys=True))
+
+
+def _maxdiff_nan(a, b):
+    '''Largest |a - b| over the entries where both are finite, relative to the largest finite |b| (inf if the NaN
+    patterns differ)'''
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    if not np.array_equal(np.isnan(a), np.isnan(b)):
+        return float('inf')
+    m = np.isfinite(a) & np.isfinite(b)
+    if not np.any(m):
+        return 0.0
+    scale = np.max(np.abs(b[m]))
+    diff = float(np.max(np.abs(a[m] - b[m])))
+    return diff/scale if scale > 0 else diff
+
+
 def _rel(a, b):
     '''Largest difference relative to the largest magnitude of b'''
     return float(np.max(np.abs(a - b))/np.max(np.abs(b)))
@@ -105,6 +127,7 @@ def run_eval_parity(mesh_resolution, fe_order, mp_q):
                     Fi = F[key][1:-1]
                     if solver_gradients:
                         results[f'{name}/{key}'] = _rel(Fi, P[key])
+                        results[f'{name}/{key}/argmax'] = int(np.argmax(np.abs(Fi - P[key])))
                     else:  # The solver's gradients leave out the LCFS node: compare all but the outermost node
                         results[f'{name}/solve_with_bootstrap/{key}'] = _rel(Fi[:-1], P[key][:-1])
                         results[f'{name}/outermost/{key}'] = _rel(Fi[-1:], P[key][-1:])
@@ -150,6 +173,7 @@ def run_eval_parity(mesh_resolution, fe_order, mp_q):
         F = mygs.eval_bootstrap(**base)
         F_lcfs = mygs.eval_bootstrap(**dict(base, te=at(Te_k, -1, 0.0)))
         results['lcfs_te_zero_unused'] = all(F[key].tobytes() == F_lcfs[key].tobytes() for key in EVAL_KEYS)
+        results['lcfs_te_zero_unused/maxrel'] = max(_maxdiff_nan(F[key], F_lcfs[key]) for key in EVAL_KEYS)
         # psi_convention = 1 (0 at the LCFS) gives the mirror of psi_convention = 0, bitwise
         F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ni_c, setup['Zeff_val'], nimp=nimp_c, ln_lambda_model=2)
         mygs._tMaker_equil.psi_convention = 1
@@ -159,6 +183,7 @@ def run_eval_parity(mesh_resolution, fe_order, mp_q):
         finally:
             mygs._tMaker_equil.psi_convention = 0
         results['mirror'] = all(F[key].tobytes() == F_mirror[key][::-1].tobytes() for key in EVAL_KEYS)
+        results['mirror/maxrel'] = {key: _maxdiff_nan(F[key], F_mirror[key][::-1]) for key in EVAL_KEYS}
         # Without an equilibrium (before init_psi) the evaluation reports it
         from OpenFUSIONToolkit.TokaMaker._core import TokaMaker_equilibrium
         fresh = TokaMaker_equilibrium(mygs)
@@ -200,7 +225,10 @@ def test_ITER_bootstrap_eval_parity(order):
 
     References: O. Sauter et al., Phys. Plasmas 6, 2834 (1999); A. Redl et al., Phys. Plasmas 28, 022502 (2021).
     '''
+    t0 = time.time()
     results = mp_run(run_eval_parity, (1.0, order), timeout=300)
+    _preflight('bootstrap_eval_parity', {'wall_s': time.time() - t0,
+                                         'res': None if results is None else results[0]})
     assert results is not None
     res = results[0]
     bounds = {'jdotB_bs_raw': 6.0E-15, 'jphi_bs_raw': 6.0E-15, 'jphi_pd_raw': 1.0E-14, 'f_t': 1.0E-14,
@@ -298,7 +326,10 @@ def test_ITER_bootstrap_eval_insolve(order):
     1.7E-3 in test_ITER_bootstrap_eval_parity). The stored field-aligned part jphi_bs_raw agrees with
     eval_bootstrap's to the same level (measured 7.4E-5 and 1.15E-4 of the peak; bound 3.5E-4).
     '''
+    t0 = time.time()
     results = mp_run(run_eval_insolve, (1.0, order), timeout=300)
+    _preflight('bootstrap_eval_insolve', {'wall_s': time.time() - t0,
+                                          'res': None if results is None else results[0]})
     assert results is not None
     res = results[0]
     assert res['state_unchanged']

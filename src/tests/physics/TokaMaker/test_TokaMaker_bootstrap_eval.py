@@ -5,6 +5,7 @@
 #------------------------------------------------------------------------------
 # TokaMaker tests: eval_bootstrap (the internal solver's bootstrap evaluation on a given equilibrium) against the
 # Redl formula of bootstrap.py, its options, and the evaluation inside solve_bootstrap, on ITER
+import os
 import pytest
 import numpy as np
 from tokamaker_testing import mp_run, setup_ITER_bootstrap_internal
@@ -65,6 +66,17 @@ def _rel(a, b):
     return float(np.max(np.abs(a - b))/np.max(np.abs(b)))
 
 
+def _rejects(fn, **kwargs):
+    '''True if fn(**kwargs) raises ValueError (any other outcome is False)'''
+    try:
+        fn(**kwargs)
+    except ValueError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def run_eval_parity(mesh_resolution, fe_order, mp_q):
     setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
     if setup is None:
@@ -113,6 +125,51 @@ def run_eval_parity(mesh_resolution, fe_order, mp_q):
             except ValueError:
                 continue
             raise AssertionError(f"eval_bootstrap accepted invalid input {list(kwargs)}")
+        # Each further rejection, with one input changed (node 100 is inside the LCFS, the last node is on it)
+        base = dict(psi=x, te=Te_k, ti=Te_k, ne=ne, ni=ne, Zeff=1.5)
+
+        def at(y, i, v):
+            y = np.array(y, dtype=float)
+            y[i] = v
+            return y
+        x4 = np.array([0.0, 0.3, 0.6, 1.0])
+        invalid = {'psi_duplicate': {'psi': at(x, 100, x[99])}, 'psi_nan': {'psi': at(x, 100, np.nan)},
+                   'te_nan': {'te': at(Te_k, 100, np.nan)}, 'te_inf_lcfs': {'te': at(Te_k, -1, np.inf)},
+                   'te_zero': {'te': at(Te_k, 100, 0.0)}, 'ti_negative': {'ti': at(Te_k, 100, -1.0E-3)},
+                   'ne_zero': {'ne': at(ne, 100, 0.0)}, 'ni_zero': {'ni': at(ne, 100, 0.0)}, 'Zeff_below_1': {'Zeff': 0.5},
+                   'nimp_negative': {'nimp': at(np.zeros(n), 100, -1.0E17)}, 'te_scalar': {'te': 5.0},
+                   'nimp_scalar': {'nimp': 0.0}, 'nimp_imp_pressure_false': {'nimp': np.zeros(n), 'imp_pressure': False},
+                   'ln_lambda_float': {'ln_lambda_model': 2.7}, 'imp_pressure_string': {'imp_pressure': 'False'},
+                   'too_few_interior': {'psi': x4, 'te': np.full(4, 5.0), 'ti': np.full(4, 5.0), 'ne': np.full(4, 1.0E20),
+                                        'ni': np.full(4, 1.0E20)}}
+        for name, kwargs in invalid.items():
+            results[f'rejects/{name}'] = _rejects(mygs.eval_bootstrap, **dict(base, **kwargs))
+        results['rejects/set_boot_ops_ln_lambda_float'] = _rejects(mygs.set_boot_ops, ln_lambda_model=2.7)
+        results['rejects/set_boot_ops_imp_pressure_string'] = _rejects(mygs.set_boot_ops, imp_pressure='False')
+        # A point on the LCFS is not used: T_e = 0 there is accepted and changes nothing
+        F = mygs.eval_bootstrap(**base)
+        F_lcfs = mygs.eval_bootstrap(**dict(base, te=at(Te_k, -1, 0.0)))
+        results['lcfs_te_zero_unused'] = all(F[key].tobytes() == F_lcfs[key].tobytes() for key in EVAL_KEYS)
+        # psi_convention = 1 (0 at the LCFS) gives the mirror of psi_convention = 0, bitwise
+        F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ni_c, setup['Zeff_val'], nimp=nimp_c, ln_lambda_model=2)
+        mygs._tMaker_equil.psi_convention = 1
+        try:
+            F_mirror = mygs.eval_bootstrap(1.0 - x[::-1], Te_k[::-1], Te_k[::-1], ne[::-1], ni_c[::-1],
+                                           setup['Zeff_val'], nimp=nimp_c[::-1], ln_lambda_model=2)
+        finally:
+            mygs._tMaker_equil.psi_convention = 0
+        results['mirror'] = all(F[key].tobytes() == F_mirror[key][::-1].tobytes() for key in EVAL_KEYS)
+        # Without an equilibrium (before init_psi) the evaluation reports it
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker_equilibrium
+        fresh = TokaMaker_equilibrium(mygs)
+        try:
+            fresh.eval_bootstrap(**base)
+            results['no_equilibrium'] = False
+        except ValueError:
+            results['no_equilibrium'] = False
+        except Exception as e:
+            results['no_equilibrium'] = 'No equilibrium' in str(e)
+        del fresh
     except Exception:
         import traceback
         traceback.print_exc()
@@ -139,6 +196,10 @@ def test_ITER_bootstrap_eval_parity(order):
     from the differently rounded abscissae, and the outermost interior node differs by the gradient stencil
     (one-sided in the solver; 1.0E-3 of its value), which is checked to exceed round-off. The derived impurity
     density equals the carbon density to round-off, which the gradient raises to 1.5E-14 in <j.B>.
+    Invalid input (non-finite, non-physical on the nodes used, too few nodes, scalars other than Z_eff,
+    conflicting or unconverted options, duplicate points) raises ValueError, T_e = 0 on the unused LCFS point
+    changes nothing, psi_convention = 1 gives the mirror of psi_convention = 0 bitwise, and without an
+    equilibrium the evaluation reports it.
 
     References: O. Sauter et al., Phys. Plasmas 6, 2834 (1999); A. Redl et al., Phys. Plasmas 28, 022502 (2021).
     '''
@@ -160,6 +221,14 @@ def test_ITER_bootstrap_eval_parity(order):
     # Each option changes <j.B> (measured: 8.0E-3 and 1.7E-3 of the peak)
     assert res['imp_effect'] > 4.0E-3
     assert res['sauter_effect'] > 9.0E-4
+    # Each invalid input raises ValueError; a point on the LCFS is not checked beyond being finite
+    rejects = [key for key in res if key.startswith('rejects/')]
+    assert len(rejects) == 18
+    for key in rejects:
+        assert res[key], key
+    assert res['lcfs_te_zero_unused']
+    assert res['mirror']
+    assert res['no_equilibrium']
 
 
 def run_eval_insolve(mesh_resolution, fe_order, mp_q):
@@ -193,6 +262,7 @@ def run_eval_insolve(mesh_resolution, fe_order, mp_q):
         # The in-solve values come from the last evaluation, one or more iterations before the converged
         # equilibrium (freeze at djbs_tol): eval_bootstrap on the converged equilibrium agrees to that level
         results['insolve_default'] = _rel(F['jdotB_bs_raw'], bp['jdotB_bs_raw'])
+        results['insolve_default_bs'] = _rel(F['jphi_bs_raw'], bp['jphi_bs_raw'])
         results['insolve_default_vs_opts'] = _rel(F_opts['jdotB_bs_raw'], bp['jdotB_bs_raw'])
         # Both options in the solve; eval_bootstrap takes them from the solve's options by default
         bp_default = bp
@@ -201,12 +271,25 @@ def run_eval_insolve(mesh_resolution, fe_order, mp_q):
         F = mygs.eval_bootstrap(x, Te/1e3, Te/1e3, ne, ni, Zeff)
         results['insolve_opts'] = _rel(F['jdotB_bs_raw'], bp['jdotB_bs_raw'])
         results['insolve_opts_pd'] = _rel(F['jphi_pd_raw'], bp['jphi_pd_raw'])
+        results['insolve_opts_bs'] = _rel(F['jphi_bs_raw'], bp['jphi_bs_raw'])
         # The options survive save and load
         mygs._tMaker_equil.save_TokaMaker('ITER_boot_eval_test.h5')
         mygs.boot_reset()
         mygs.replace_eq(source_file='ITER_boot_eval_test.h5')
         ops = mygs._tMaker_equil._boot_ops
         results['ops_loaded'] = bool(ops['ln_lambda_model'] == 2 and ops['imp_pressure'])
+        # An invalid ln_lambda_model in the file loads the default (with a warning)
+        import h5py
+        paths = []
+        with h5py.File('ITER_boot_eval_test.h5', 'r+') as fid:
+            fid.visit(lambda name: paths.append(name) if name.endswith('BOOT_OPS/LN_LAMBDA_MODEL') else None)
+            for path in paths:
+                fid[path][...] = 7
+        mygs.replace_eq(source_file='ITER_boot_eval_test.h5')
+        os.remove('ITER_boot_eval_test.h5')
+        ops = mygs._tMaker_equil._boot_ops
+        results['ln_lambda_loaded_invalid'] = bool(len(paths) == 1 and ops['ln_lambda_model'] == 1
+                                                   and ops['imp_pressure'])
     except Exception:
         import traceback
         traceback.print_exc()
@@ -222,11 +305,12 @@ def test_ITER_bootstrap_eval_insolve(order):
     carbon impurity, eval_bootstrap on the converged equilibrium reproduces the solver's last <j.B> to the level of
     its freeze tolerance, with the default options and with both options set in the solve, and differs from it by
     the options' effect otherwise. eval_bootstrap changes neither the equilibrium nor the bootstrap state, and the
-    options are saved and loaded with the equilibrium.
+    options are saved and loaded with the equilibrium; an invalid ln_lambda_model in the file loads the default.
 
     Differences are relative to the largest magnitude. The bound is about three times the largest difference
     measured (5.8E-5, 9.0E-5 and 1.1E-4 of the peak); each option alone changes <j.B> by more (8.0E-3 and
-    1.7E-3 in test_ITER_bootstrap_eval_parity).
+    1.7E-3 in test_ITER_bootstrap_eval_parity). The stored field-aligned part jphi_bs_raw agrees with
+    eval_bootstrap's to the same level (measured 7.4E-5 and 1.15E-4 of the peak; bound 3.5E-4).
     '''
     results = mp_run(run_eval_insolve, (1.0, order), timeout=300)
     assert results is not None
@@ -235,6 +319,9 @@ def test_ITER_bootstrap_eval_insolve(order):
     assert res['insolve_default'] < 3.0E-4
     assert res['insolve_opts'] < 3.0E-4
     assert res['insolve_opts_pd'] < 3.0E-4
+    assert res['insolve_default_bs'] < 3.5E-4  # measured 7.4E-5
+    assert res['insolve_opts_bs'] < 3.5E-4  # measured 1.15E-4
     assert res['insolve_default_vs_opts'] > 3.0E-3  # measured 7.5E-3
     assert res['insolve_opts_vs_default'] > 3.0E-3  # the options reach the solve; measured 9.1E-3
     assert res['ops_loaded']
+    assert res['ln_lambda_loaded_invalid']

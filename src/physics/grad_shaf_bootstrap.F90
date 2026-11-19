@@ -1733,7 +1733,8 @@ END SUBROUTINE gradient_
 !------------------------------------------------------------------------------
 !> Density of one impurity species that, with main ions of charge 1, satisfies quasineutrality and gives
 !! Z_eff: from n_e = n_i + Z n_imp and Z_eff n_e = n_i + Z^2 n_imp, n_imp = (n_e - n_i)^2/(Z_eff n_e - n_i)
-!! (zero where n_i >= n_e)
+!! (zero where n_i >= n_e or Z_eff n_e <= n_i; with Z_eff < 1 the result, of charge Z < 1, is not a
+!! physical species)
 !------------------------------------------------------------------------------
 SUBROUTINE imp_density(n, ne, ni, Zeff, nimp)
 INTEGER(i4), INTENT(in) :: n !< Number of points

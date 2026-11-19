@@ -819,6 +819,8 @@ n=npsi-i0+1
 ALLOCATE(te_ev(n),ti_ev(n),nz(n),jdotB(0:n),jphi_bs(0:n),jphi_pd(0:n))
 te_ev=te(i0:npsi)*1000.0_r8
 ti_ev=ti(i0:npsi)*1000.0_r8
+IF(MAXVAL(te_ev) > 5.0e5_r8)CALL oft_warn('eval_bootstrap: max(Te) > 500 keV -- profiles should be in keV, not eV')
+IF(MAXVAL(ti_ev) > 5.0e5_r8)CALL oft_warn('eval_bootstrap: max(Ti) > 500 keV -- profiles should be in keV, not eV')
 nz=nimp(i0:npsi)
 IF(imp_mode==1)CALL imp_density(n,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi),nz)
 ! P' of the equilibrium, p_scale*P%fp (as gs_ffprim_pprime)

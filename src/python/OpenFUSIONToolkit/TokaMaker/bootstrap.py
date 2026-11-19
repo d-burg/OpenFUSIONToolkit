@@ -611,7 +611,8 @@ def sauter_coefficients(fT, nu_e_star, nu_i_star, Zeff):
     \f$Z = Z_{eff}\f$ in every coefficient, as the erratum states for these fits. Used by @ref redl_bootstrap with
     `coefficient_model='sauter'`, whose `'jboot1'` assembly has the erratum's \f$(1-R_{pe})/R_{pe}\f$ factor in the
     ion-temperature term; the erratum's main-ion charge in \f$\nu_{i*}\f$ and \f$\ln\Lambda_{ii}\f$ (eqs. 18c, 18e)
-    is up to the caller.
+    is up to the caller (in @ref redl_bootstrap `ion_collisionality_model='unity'`; in the solver
+    `ion_charge_model` = 2).
 
     @param fT Trapped particle fraction \f$f_t\f$
     @param nu_e_star Electron collisionality \f$\nu_{e*}\f$
@@ -675,6 +676,8 @@ def redl_bootstrap(
     differ (`'jB'`, \f$Z_{eff}^4\f$, \f$\ln\Lambda = 17\f$), which changes the current by several percent.
     The solver's `bs_model` 1 or 2 is `coefficient_model` 'redl' or 'sauter': the two differ only in the fits
     of \f$L_{31}, L_{32}, L_{34}\f$ and \f$\alpha\f$ (@ref sauter_coefficients); collisionalities and assembly are shared.
+    The solver's `ion_charge_model` = 2 (main-ion charge 1 in \f$\nu_{i*}\f$ and \f$\ln\Lambda_{ii}\f$, as the 2002
+    erratum) is `ion_collisionality_model='unity'` with the logarithms of `calculate_ln_lambda(..., 'unity')`.
 
     @param psi_N Normalized poloidal flux profile \f$\hat{\psi}\f$
     @param Te Electron temperature profile \f$T_e\f$ [eV]

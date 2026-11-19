@@ -104,6 +104,7 @@ TYPE, BIND(C) :: tokamaker_boot_ops_type
   INTEGER(c_int)  :: ln_lambda_model = 1          !< Coulomb logarithms: 1 NRL, 2 Sauter 1999
   LOGICAL(c_bool) :: imp_pressure = .FALSE.       !< Count the impurity in the ion pressure
   INTEGER(c_int)  :: bs_model = 1                 !< Bootstrap coefficients: 1 Redl 2021, 2 Sauter 1999
+  INTEGER(c_int)  :: ion_charge_model = 1         !< Ion charge in nu_i*, ln Lambda_ii: 1 Koh form, 2 main-ion charge
 END TYPE tokamaker_boot_ops_type
 !---------------------------------------------------------------------------------
 !> TokaMaker wrapper object for Python API
@@ -646,6 +647,10 @@ IF((bops%bs_model<1).OR.(bops%bs_model>2))THEN
   CALL copy_string('Invalid bs_model (1 Redl 2021, 2 Sauter 1999)',error_str)
   RETURN
 END IF
+IF((bops%ion_charge_model<1).OR.(bops%ion_charge_model>2))THEN
+  CALL copy_string('Invalid ion_charge_model (1 Koh form, 2 main-ion charge)',error_str)
+  RETURN
+END IF
 I_base=>torflux_unwrap(tMaker_equil_obj%I)
 SELECT TYPE(I => I_base)
 TYPE IS (jphi_bs_flux_func)
@@ -666,6 +671,7 @@ TYPE IS (jphi_bs_flux_func)
   I%boot_ops%ln_lambda_model = bops%ln_lambda_model
   I%boot_ops%imp_pressure = bops%imp_pressure
   I%boot_ops%bs_model = bops%bs_model
+  I%boot_ops%ion_charge_model = bops%ion_charge_model
 CLASS DEFAULT
   CALL copy_string('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.',error_str)
 END SELECT
@@ -704,6 +710,7 @@ TYPE IS (jphi_bs_flux_func)
   bops%ln_lambda_model = I%boot_ops%ln_lambda_model
   bops%imp_pressure = I%boot_ops%imp_pressure
   bops%bs_model = I%boot_ops%bs_model
+  bops%ion_charge_model = I%boot_ops%ion_charge_model
 CLASS DEFAULT
   initialized = .FALSE. ! Not a bootstrap profile: no options
 END SELECT
@@ -794,7 +801,7 @@ END SUBROUTINE tokamaker_saw_reset_1d
 !! in the solve, and its f_t and nu* are left at zero.
 !---------------------------------------------------------------------------------
 SUBROUTINE tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model, &
-    imp_mode,bs_model,profs,error_str) BIND(C,NAME="tokamaker_eval_bootstrap")
+    imp_mode,bs_model,ion_charge_model,profs,error_str) BIND(C,NAME="tokamaker_eval_bootstrap")
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
 INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Number of nodes
 REAL(c_double), INTENT(in) :: psi_in(npsi) !< Normalized \f$ \psi \f$ of the nodes (0 at the LCFS, 1 at the axis), increasing
@@ -807,6 +814,7 @@ REAL(c_double), INTENT(in) :: nimp(npsi) !< Impurity density [m^-3] (used if imp
 INTEGER(c_int), VALUE, INTENT(in) :: ln_lambda_model !< Coulomb logarithms: 1 NRL, 2 Sauter 1999
 INTEGER(c_int), VALUE, INTENT(in) :: imp_mode !< Impurity in the ion pressure: 0 none, 1 @ref grad_shaf_bootstrap::imp_density, 2 nimp
 INTEGER(c_int), VALUE, INTENT(in) :: bs_model !< Bootstrap coefficients: 1 Redl 2021, 2 Sauter 1999
+INTEGER(c_int), VALUE, INTENT(in) :: ion_charge_model !< Ion charge in nu_i*, ln Lambda_ii: 1 Koh form, 2 main-ion charge
 REAL(c_double), INTENT(out) :: profs(npsi,6) !< <j_BS.B> [T A/m^2], field-aligned and pressure-driven jphi [A/m^2], f_t, nu_e*, nu_i*
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
 INTEGER(i4) :: i0,n,ierr
@@ -825,6 +833,10 @@ IF((bs_model<1).OR.(bs_model>2))THEN
   CALL copy_string('Invalid bs_model (1 Redl 2021, 2 Sauter 1999)',error_str)
   RETURN
 END IF
+IF((ion_charge_model<1).OR.(ion_charge_model>2))THEN
+  CALL copy_string('Invalid ion_charge_model (1 Koh form, 2 main-ion charge)',error_str)
+  RETURN
+END IF
 profs=0.d0
 i0=MERGE(2,1,psi_in(1)==0.d0) ! The LCFS is not a node
 n=npsi-i0+1
@@ -838,11 +850,11 @@ IF(imp_mode==1)CALL imp_density(n,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi),nz)
 ! P' of the equilibrium, p_scale*P%fp (as gs_ffprim_pprime)
 IF(imp_mode==0)THEN
   CALL bootstrap_eval(tMaker_equil_obj,n,psi_in(i0:npsi),te_ev,ti_ev,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi), &
-    tMaker_equil_obj%p_scale,ln_lambda_model,bs_model,jdotB,jphi_bs,jphi_pd,ierr, &
+    tMaker_equil_obj%p_scale,ln_lambda_model,bs_model,ion_charge_model,jdotB,jphi_bs,jphi_pd,ierr, &
     ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6))
 ELSE
   CALL bootstrap_eval(tMaker_equil_obj,n,psi_in(i0:npsi),te_ev,ti_ev,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi), &
-    tMaker_equil_obj%p_scale,ln_lambda_model,bs_model,jdotB,jphi_bs,jphi_pd,ierr,nimp=nz, &
+    tMaker_equil_obj%p_scale,ln_lambda_model,bs_model,ion_charge_model,jdotB,jphi_bs,jphi_pd,ierr,nimp=nz, &
     ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6))
 END IF
 IF(ierr/=0)THEN

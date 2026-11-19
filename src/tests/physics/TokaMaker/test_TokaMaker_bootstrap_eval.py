@@ -482,7 +482,7 @@ def run_eval_sauter(mesh_resolution, fe_order, mp_q):
         err = eq._oft_env.get_c_errorbuff()
         vals = [np.ascontiguousarray(v) for v in (1.0 - x[::-1], Te_k[::-1], Te_k[::-1], ne[::-1], ne[::-1],
                                                   np.full(n, 1.5), np.zeros(n))]
-        tokamaker_eval_bootstrap(eq.c_ptr, n, *vals, 1, 0, 3, np.zeros((6, n)), err)
+        tokamaker_eval_bootstrap(eq.c_ptr, n, *vals, 1, 0, 3, 1, np.zeros((6, n)), err)
         results['fortran_eval_rejects'] = b'Invalid bs_model' in err.value
         # psi_convention = 1 gives the mirror of psi_convention = 0 bitwise
         F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ni_c, setup['Zeff_val'], nimp=nimp_c, bs_model=2)

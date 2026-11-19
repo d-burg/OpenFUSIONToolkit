@@ -50,6 +50,7 @@ TYPE :: boot_ops
   INTEGER(i4) :: ln_lambda_model = 1 !< Coulomb logarithms: 1 = NRL (floored at 10), 2 = Sauter 1999 eqs. 18d-18e (see @ref bootstrap_eval)
   LOGICAL :: imp_pressure = .FALSE. !< Count the impurity density of @ref imp_density in the ion pressure
   INTEGER(i4) :: bs_model = 1 !< Bootstrap coefficients: 1 = Redl 2021, 2 = Sauter 1999 with its 2002 erratum (see @ref redl_bootstrap)
+  INTEGER(i4) :: ion_charge_model = 1 !< Ion charge in nu_i*, ln Lambda_ii: 1 = Koh form, 2 = main-ion charge (see @ref bootstrap_eval)
 END TYPE boot_ops
 !------------------------------------------------------------------------------
 !> Current profiles of the last @ref jphi_bs_update (diagnostics; the update itself uses its own
@@ -162,6 +163,7 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(self%boot_ops%ln_lambda_model,filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL')
   CALL hdf5_write(MERGE(1_i4, 0_i4, self%boot_ops%imp_pressure),filename,path//'/BOOT_OPS/IMP_PRESSURE')
   CALL hdf5_write(self%boot_ops%bs_model,filename,path//'/BOOT_OPS/BS_MODEL')
+  CALL hdf5_write(self%boot_ops%ion_charge_model,filename,path//'/BOOT_OPS/ION_CHARGE_MODEL')
 END IF
 CALL boot_profs_save(self%boot_profs,filename,path//'/BOOT_PROFS')
 END SUBROUTINE jphi_bs_save_hdf5
@@ -249,6 +251,14 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
     IF((self%boot_ops%bs_model /= 1).AND.(self%boot_ops%bs_model /= 2))THEN
       CALL oft_warn('jphi_bs_load: invalid "bs_model" in file, using 1 (Redl 2021)')
       self%boot_ops%bs_model = 1
+    END IF
+  END IF
+  ! Files written before the option existed keep the default (1)
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/ION_CHARGE_MODEL'))THEN
+    CALL hdf5_read(self%boot_ops%ion_charge_model,filename,path//'/BOOT_OPS/ION_CHARGE_MODEL',success=success)
+    IF((self%boot_ops%ion_charge_model /= 1).AND.(self%boot_ops%ion_charge_model /= 2))THEN
+      CALL oft_warn('jphi_bs_load: invalid "ion_charge_model" in file, using 1')
+      self%boot_ops%ion_charge_model = 1
     END IF
   END IF
   self%boot_ops%initialized = .TRUE.
@@ -620,11 +630,13 @@ ELSE
   IF(self%boot_ops%imp_pressure)THEN
     CALL imp_density(self%npsi, ne, ni, Zeff, nimp)
     CALL bootstrap_eval(gseq, self%npsi, xpsi, Te, Ti, ne, ni, Zeff, pscale, self%boot_ops%ln_lambda_model, &
-      self%boot_ops%bs_model, jdotB, jphi_bs, jphi_pd, ierr, nimp=nimp, ravgs=ravgs(1:,:), qa=qa(1:,:), &
+      self%boot_ops%bs_model, self%boot_ops%ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, nimp=nimp, &
+      ravgs=ravgs(1:,:), qa=qa(1:,:), &
       diagnose=self%boot_ops%diagnose_bs)
   ELSE
     CALL bootstrap_eval(gseq, self%npsi, xpsi, Te, Ti, ne, ni, Zeff, pscale, self%boot_ops%ln_lambda_model, &
-      self%boot_ops%bs_model, jdotB, jphi_bs, jphi_pd, ierr, ravgs=ravgs(1:,:), qa=qa(1:,:), &
+      self%boot_ops%bs_model, self%boot_ops%ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, &
+      ravgs=ravgs(1:,:), qa=qa(1:,:), &
       diagnose=self%boot_ops%diagnose_bs)
   END IF
   IF(ierr == 0)THEN
@@ -1760,18 +1772,21 @@ END SUBROUTINE imp_density
 !! the nodes
 !!
 !! jboot1 form (no sign(q) factor: <j.B> is odd in F) with the coefficients of `bs_model` (see
-!! @ref redl_bootstrap: 1 = Redl 2021 with L34=L31, 2 = Sauter 1999 with its 2002 erratum), the Koh multi-species ion
-!! collisionality with deuterium main ions (Z_i^4 = (n_e/n_i) Z_eff), |q|, and the major radius
-!! (R_max+R_min)/2 and inverse aspect ratio of each surface from @ref sauter_fc. Coulomb logarithms
-!! (`ln_lambda_model`): 1 = NRL formulary electron form and the ion form of Sauter 1999 eq. 18e with
-!! Z = max(n_e/n_i,1), both floored at 10; 2 = Sauter 1999 eqs. 18d and 18e (the same Z), no floor.
+!! @ref redl_bootstrap: 1 = Redl 2021 with L34=L31, 2 = Sauter 1999 with its 2002 erratum), |q|, and the major
+!! radius (R_max+R_min)/2 and inverse aspect ratio of each surface from @ref sauter_fc. Coulomb logarithms
+!! (`ln_lambda_model`): 1 = NRL formulary electron form and the ion form of Sauter 1999 eq. 18e,
+!! both floored at 10; 2 = Sauter 1999 eqs. 18d and 18e, no floor. Ion charge Z in nu_i* (Z^4) and in
+!! ln Lambda_ii (`ion_charge_model`): 1 = the Koh multi-species form with main ions of charge 1,
+!! Z^4 = (n_e/n_i) Z_eff, and Z = max(n_e/n_i,1) in ln Lambda_ii; 2 = the main-ion charge, 1, in both, as
+!! the 2002 erratum prescribes for Sauter 1999 eqs. 18c and 18e (with `bs_model` 2 and `ln_lambda_model` 2
+!! this is the published model).
 !! The main-ion density enters the collisionality and the Coulomb logarithms; the ion pressure and
 !! its gradient also count `nimp` (at T_i) if present. Gradients are taken on the nodes; the LCFS is
 !! not a node, and the values there (and on the axis, if it is a node) are extrapolated.
 !! Neither `gseq` nor any bootstrap profile state is changed.
 !------------------------------------------------------------------------------
 SUBROUTINE bootstrap_eval(gseq, n_psi, psi_N, Te, Ti, ne, ni, Zeff, pscale, ln_lambda_model, bs_model, &
-  jdotB, jphi_bs, jphi_pd, ierr, nimp, ravgs, qa, ft_out, nu_out, diagnose)
+  ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, nimp, ravgs, qa, ft_out, nu_out, diagnose)
 CLASS(gs_equil), INTENT(inout) :: gseq !< Equilibrium object (not changed)
 INTEGER(i4), INTENT(in) :: n_psi !< Number of nodes
 REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi (OFT convention, 0=LCFS), strictly increasing, psi_N(1)>0
@@ -1783,6 +1798,7 @@ REAL(r8), INTENT(in) :: Zeff(n_psi) !< Effective charge
 REAL(r8), INTENT(in) :: pscale !< Pressure profile scale: P' = pscale*P%fp (pressure-driven part)
 INTEGER(i4), INTENT(in) :: ln_lambda_model !< Coulomb logarithms: 1 = NRL, 2 = Sauter 1999
 INTEGER(i4), INTENT(in) :: bs_model !< Bootstrap coefficients: 1 = Redl 2021, 2 = Sauter 1999 (2002 erratum)
+INTEGER(i4), INTENT(in) :: ion_charge_model !< Ion charge in nu_i*, ln Lambda_ii: 1 = Koh form, 2 = main-ion charge (erratum)
 REAL(r8), INTENT(out) :: jdotB(0:n_psi) !< <j_BS.B> [T A/m^2], jdotB(0) the LCFS value (extrapolated)
 REAL(r8), INTENT(out) :: jphi_bs(0:n_psi) !< Bootstrap current as TokaMaker jphi = <j_phi> [A/m^2], with jphi_pd
 REAL(r8), INTENT(out) :: jphi_pd(0:n_psi) !< Pressure-driven part of jphi_bs [A/m^2]
@@ -1848,7 +1864,10 @@ dT_e_dpsi = -dT_e_dpsi
 dT_i_dpsi = -dT_i_dpsi
 dn_e_dpsi = -dn_e_dpsi
 dn_i_dpsi = -dn_i_dpsi
+Zdom = 1.0_r8    ! main (dominant) ion charge (deuterium)
+! Ion charge in ln Lambda_ii: max(n_e/n_i,1), or the main-ion charge (Sauter 1999 eq. 18e with the 2002 erratum)
 Z_lnLam = MAX(ne/ni, 1.0_r8)
+IF(ion_charge_model == 2)Z_lnLam = Zdom
 IF(ln_lambda_model == 2)THEN
   ! Coulomb logarithms of Sauter et al., Phys. Plasmas 6, 2834 (1999), eqs. 18d and 18e (n in m^-3, T in eV)
   ln_le = 31.3_r8 - LOG(SQRT(ne) / Te)
@@ -1864,10 +1883,10 @@ ELSE
   ln_le  = MAX(ln_le,  10.0_r8)
   ln_lii = MAX(ln_lii, 10.0_r8)
 END IF
-! Ion collisionality: Koh multi-species model
-Zdom = 1.0_r8    ! dominant ion charge (deuterium)
+! Ion collisionality: Koh multi-species model, or the main-ion charge (Sauter 1999 eq. 18c with the 2002 erratum)
 Zavg = ne / ni
 Zion = (Zdom**2 * Zavg * Zeff)**0.25_r8
+IF(ion_charge_model == 2)Zion = Zdom
 nu_i_star = 4.90e-18_r8 * ABS(qvals) * R_geo * ni &
           * Zion**4 * ln_lii / (Ti**2 * eps**1.5_r8)
 ! Electron collisionality

@@ -116,10 +116,10 @@ At each nonlinear iteration `solve_bootstrap` evaluates the Redl et al. (2021) f
 (1999), `bs_model` below) in the `jboot1` form of Sauter et al. (1999) on the profile nodes (Fortran `bootstrap_eval`). The trapped fraction,
 \f$ q \f$, the inverse aspect ratio \f$ \epsilon = (R_{max}-R_{min})/(R_{max}+R_{min}) \f$ and the major radius
 \f$ (R_{max}+R_{min})/2 \f$ of each surface come from one contour pass (`sauter_fc`); the collisionalities use \f$ |q| \f$, and
-\f$ \nu_{i*} \f$ the charge factor \f$ Z^4 = (n_e/n_i) Z_{eff} \f$. The kinetic gradients are taken on the nodes without the
+by default \f$ \nu_{i*} \f$ the charge factor \f$ Z^4 = (n_e/n_i) Z_{eff} \f$ (`ion_charge_model` below). The kinetic gradients are taken on the nodes without the
 LCFS, and the values on the LCFS (and on the axis) are extrapolated. `eval_bootstrap` runs the same code on the
 current equilibrium at given surfaces and kinetic profiles, without solving and without changing the equilibrium,
-and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$. Three options
+and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$. Four options
 (`set_boot_ops`, `solve_bootstrap`, `eval_bootstrap`) act on both:
 - `bs_model`: the fits of the four coefficients \f$ L_{31} \f$, \f$ L_{32} \f$, \f$ L_{34} \f$ and \f$ \alpha \f$; everything
   else (collisionalities, Coulomb logarithms, geometry, the `jboot1` assembly, the conversion to \f$ j_\phi \f$) is
@@ -132,17 +132,22 @@ and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{
   for comparison with them. In the banana regime the two \f$ L_{31} \f$ differ by up to about 0.08 (of at most 1);
   at finite collisionality and \f$ Z_{eff} > 1 \f$ the fits differ more, most in \f$ \alpha \f$ (Sauter's has no
   \f$ Z_{eff} \f$ dependence; as \f$ \nu_{i*} \to \infty \f$, \f$ \alpha \to 2.1 \f$ (Sauter) and \f$ -0.5 \f$ (Redl)).
-  With 2 only the coefficient fits change; the collisionalities keep the solver's conventions above. These differ
-  from the erratum, which uses the main-ion charge \f$ Z_i \f$ in the ion terms (eqs. 18c and 18e) and \f$ Z_{eff} \f$
-  elsewhere: the solver's \f$ \nu_{i*} \f$ has the charge factor \f$ (n_e/n_i) Z_{eff} \f$ and its \f$ \ln\Lambda_{ii} \f$
-  \f$ Z = \max(n_e/n_i, 1) \f$. With \f$ Z_i = 1 \f$ instead, \f$ \langle j\cdot B \rangle \f$ on the ITER test case
-  changes by 1.5 % (\f$ Z_{eff} = 2 \f$) and 2.3 % (\f$ Z_{eff} = 4 \f$) of its peak, and by up to 13 % in collisional
-  cases; the main-ion charge is not offered as an option. Sauter's own Coulomb logarithms (eqs. 18d and 18e) are
-  `ln_lambda_model` = 2; against the default NRL electron logarithm they change \f$ \langle j\cdot B \rangle \f$ by
-  about \f$ 10^{-3} \f$ of its peak on the ITER test case and by up to 3 % in collisional cases.
+  With 2 only the coefficient fits change; the collisionalities keep the solver's conventions above. The published
+  model of Sauter et al. (1999) with its erratum is `bs_model`, `ln_lambda_model` and `ion_charge_model` all 2.
+  Sauter's own Coulomb logarithms (eqs. 18d and 18e) are `ln_lambda_model` = 2; against the default NRL electron
+  logarithm they change \f$ \langle j\cdot B \rangle \f$ by about \f$ 10^{-3} \f$ of its peak on the ITER test case
+  and by up to 3 % in collisional cases.
 - `ln_lambda_model`: 1 (default) uses the NRL formulary electron logarithm and the ion logarithm of Sauter et al.
-  (1999) eq. 18e with \f$ Z = \max(n_e/n_i, 1) \f$, both floored at 10; 2 uses Sauter et al. (1999) eqs. 18d and 18e
-  (the same \f$ Z \f$), without a floor.
+  (1999) eq. 18e, both floored at 10; 2 uses Sauter et al. (1999) eqs. 18d and 18e, without a floor. The ion
+  logarithm takes the \f$ Z \f$ of `ion_charge_model`.
+- `ion_charge_model`: the ion charge \f$ Z \f$ in \f$ \nu_{i*} \f$ (as \f$ Z^4 \f$, eq. 18c) and in \f$ \ln\Lambda_{ii} \f$
+  (eq. 18e). 1 (default): the Koh multi-species form, \f$ Z^4 = (n_e/n_i) Z_{eff} \f$ and \f$ Z = \max(n_e/n_i, 1) \f$.
+  2: the main-ion charge \f$ Z_i \f$ in both, as the 2002 erratum prescribes (\f$ Z_{eff} \f$ stays in \f$ \nu_{e*} \f$ and
+  in the coefficients). The solver's main ions have charge 1 (as `imp_pressure` assumes), so 2 sets \f$ Z = 1 \f$;
+  with \f$ Z_{eff} = 1 \f$ and \f$ n_i = n_e \f$ the two are the same. On the ITER test case with carbon,
+  2 changes \f$ \langle j\cdot B \rangle \f$ by 0.9 % (\f$ Z_{eff} = 1.5 \f$) to 1.8 % (\f$ Z_{eff} = 4 \f$) of its peak
+  with the Sauter coefficients and by 2.4 % to 12 % with the Redl coefficients, and by up to 11 % (Sauter) and
+  40 % (Redl) in collisional cases.
 - `imp_pressure`: the ion pressure and its gradient count \f$ n_{imp} = (n_e - n_i)^2/(Z_{eff} n_e - n_i) \f$ at
   \f$ T_i \f$, the density of the one impurity species that, with main ions of charge 1, gives quasineutrality and
   \f$ Z_{eff} \f$. The collisionalities and Coulomb logarithms keep the main-ion density. `eval_bootstrap` also takes
@@ -154,7 +159,8 @@ and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{
 `eval_bootstrap` node by node to round-off, given the same geometry and gradients (`test_TokaMaker_bootstrap_eval.py`).
 Its own defaults differ (`'jB'`, \f$ Z_{eff}^4 \f$, \f$ \ln\Lambda = 17 \f$). Its `coefficient_model` (`'redl'`, `'sauter'`)
 is `bs_model` (1, 2), and `bootstrap.sauter_coefficients` returns the Sauter coefficients alone; `use_legacy_L34`
-is a variant of the Redl fits and is rejected with `'sauter'`.
+is a variant of the Redl fits and is rejected with `'sauter'`. `ion_charge_model` = 2 is
+`ion_collisionality_model='unity'` with `calculate_ln_lambda(..., ion_lnLambda_model='unity')`.
 
 ## Where these are used
 - TokaMaker `jphi_bs_update` / `bootstrap_eval` (Fortran), `eval_bootstrap` and `solve_with_bootstrap(use_python_solve=True)`:

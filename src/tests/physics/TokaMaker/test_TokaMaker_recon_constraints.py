@@ -72,7 +72,8 @@ def test_recon_mse_closed_form():
     The reference field is the solver's own: (a) the field components returned by Mirnov constraints at the same
     points (same evaluation path), and (b) `get_field_eval('B')`, which divides by R + 1E-12 and maps the point
     through the cell, so it differs at about 1E-13 relative.
-    Measured: not yet. Provisional bounds: (a) 1E-15 (a few ulp); (b) 3E-12.
+    Measured (release build, 2 threads, 40 cases): (a) 0 (bitwise equal) for tan(gamma) and gamma; (b) 1.1E-13.
+    Bounds: (a) 1E-15 (a few ulp, as the measured difference is zero); (b) 1E-12.
     '''
     results = mp_run(run_mse_case, ())
     assert results is not None
@@ -92,7 +93,7 @@ def test_recon_mse_closed_form():
         else:
             ref_fit, ref_eval, val = np.arctan(tan_fit), np.arctan(tan_eval), -0.2
         assert abs(row[1] - ref_fit) <= 1.E-15*abs(ref_fit)
-        assert abs(row[1] - ref_eval) <= 3.E-12*abs(ref_eval)
+        assert abs(row[1] - ref_eval) <= 1.E-12*abs(ref_eval)
         # Weighted error (value - model)/err, the stored value, and no 3D correction
         assert row[0] == (val - row[1])*100.0
         assert row[2] == val
@@ -102,6 +103,59 @@ def test_recon_mse_closed_form():
         tan_off = mse_formula(B_fit[ipt, :], mse_coef_sets[1], 0.0, 0.0)
         tan_on = mse_formula(B_fit[ipt, :], mse_coef_sets[1], *mse_efields[1])
         assert abs(tan_on - tan_off) > 1.E-3*abs(tan_off)
+
+
+def run_mse_reconstruct_case(mp_q):
+    mygs, _ = solve_ITER_reference(1.0, 2)
+    if mygs is None:
+        mp_q.put(None)
+        return
+    myrecon = reconstruction(mygs)
+    # Measurements: the reference equilibrium's own signals (plasma current, four flux loops, MSE chords)
+    flux_pts = [[8.5, 0.5], [6.25, 4.25], [4.0, 0.5], [6.25, -3.5]]
+    psi_eval = mygs.get_field_eval('PSI')
+    myrecon.set_Ip(mygs.get_stats()['Ip'], 1.E5)
+    for pt in flux_pts:
+        psi_val = 2.0*np.pi*psi_eval.eval(np.array(pt))[0]
+        myrecon.add_flux_loop(pt, psi_val, 1.E-2)
+    for pt in mse_points:
+        myrecon.add_MSE(pt, mse_coef_sets[1], 0.1, 1.E-3)
+    myrecon.setup_constraints()
+    model = myrecon.eval_error()[:, 1]
+    myrecon.reset_constraints()
+    myrecon.set_Ip(mygs.get_stats()['Ip'], 1.E5)
+    for i, pt in enumerate(flux_pts):  # rows: flux loops, plasma current, MSE
+        myrecon.add_flux_loop(pt, model[i], 1.E-2)
+    for i, pt in enumerate(mse_points):
+        myrecon.add_MSE(pt, mse_coef_sets[1], model[len(flux_pts)+1+i], 1.E-3)
+    # Fortran driver as in the ITER reconstruction test: fit the magnetic axis radius and the coil currents
+    mygs.set_isoflux(None)
+    mygs.set_saddles(None)
+    mygs.set_targets(R0=mygs.o_point[0], V0=mygs.o_point[1])
+    myrecon.settings.fit_Pscale = False
+    myrecon.settings.fitR0 = True
+    myrecon.settings.fitCoils = True
+    flag = myrecon.reconstruct(maxits=5)
+    fit_out = np.loadtxt(myrecon.out_file)
+    myrecon.setup_constraints()
+    err_mat = myrecon.eval_error()
+    mp_q.put([{'flag': flag, 'fit_out': fit_out, 'err_mat': err_mat, 'nmse': mse_points.shape[0]}])
+
+
+def test_recon_mse_in_reconstruct():
+    '''MSE constraints enter the Fortran reconstruction driver like any other constraint: its output table has their
+    rows, with the modeled signal of the final equilibrium as `eval_error` evaluates it (the table holds 13
+    significant digits), and the fit to exact data keeps their weighted errors small'''
+    results = mp_run(run_mse_reconstruct_case, ())
+    assert results is not None
+    res = results[0]
+    fit_out, err_mat, nmse = res['fit_out'], res['err_mat'], res['nmse']
+    assert fit_out.shape == (err_mat.shape[0], 5)
+    assert np.all(fit_out[:, 0] == np.arange(1, err_mat.shape[0]+1))
+    mse_rows = slice(err_mat.shape[0]-nmse, err_mat.shape[0])
+    assert np.all(np.abs(fit_out[mse_rows, 2] - err_mat[mse_rows, 1]) <= 1.E-11*np.abs(err_mat[mse_rows, 1]))
+    assert np.all(np.abs(fit_out[mse_rows, 3] - err_mat[mse_rows, 2]) <= 1.E-11*np.abs(err_mat[mse_rows, 2]))
+    assert np.all(np.abs(err_mat[mse_rows, 0]) < 1.0)
 
 
 def probe_points(loc, norm, length, n_avg):
@@ -160,7 +214,8 @@ def test_recon_finite_probe():
     `get_field_eval('B')` at the points (about 1E-13 relative, see `test_recon_mse_closed_form`), (c) one averaging
     point is the point probe exactly, (d) zero length gives the point probe to round-off, and (e) the averaging
     changes the signal by much more than the bounds.
-    Measured: not yet. Provisional bounds: (a) 1E-15 relative; (b) 3E-12 relative.
+    Measured (release build, 2 threads): (a) 0 (bitwise equal); (b) 2.0E-13; (c) and (d) 0; (e) 1.2E-4 to 2.1E-2.
+    Bounds: (a) 1E-15 relative (a few ulp, as the measured difference is zero); (b) 2E-12 relative.
     '''
     results = mp_run(run_finite_probe_case, ())
     assert results is not None
@@ -180,7 +235,7 @@ def test_recon_finite_probe():
         i += n_avg
     assert i == err_mat.shape[0]
     for j in range(4):
-        assert abs(finite[j] - B_means[j]) <= 3.E-12*abs(B_means[j])
+        assert abs(finite[j] - B_means[j]) <= 2.E-12*abs(B_means[j])
     assert finite[3] == center[3]
     assert abs(finite[4] - center[4]) <= 2.3E-16*abs(center[4])
 
@@ -278,7 +333,8 @@ def run_coil_case(mp_q):
 def test_recon_coil_total_current():
     '''A coil current constraint models the coil's total current exactly as `get_coil_currents()` returns it,
     including the share of the virtual vertical stability coil (nonzero for the VS coil of the ITER reference
-    equilibrium), and constraints can be set for a subset of the coil sets'''
+    equilibrium: measured 1.5E-3 A of 1.5E5 A, so the comparison is bitwise), and constraints can be set for a subset
+    of the coil sets'''
     results = mp_run(run_coil_case, ())
     assert results is not None
     res = results[0]
@@ -462,6 +518,7 @@ def test_recon_use_round_trip(recon):
         assert type(con_out) is type(con_in)
         assert con_out.use is False
         assert con_out.err == pytest.approx(con_in.err, rel=1.E-15)
+    recon.reset_constraints()
     add_every_type(recon, True)
     recon.write_fit_in()
     recon.read_fit_in()

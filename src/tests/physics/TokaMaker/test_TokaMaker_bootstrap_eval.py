@@ -23,11 +23,13 @@ def _carbon_case(ne, Zeff):
 
 
 def _python_bootstrap(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None, ln_lambda='NRL', solver_gradients=True,
-                      coefficient_model='redl'):
+                      coefficient_model='redl', ion_charge_model=1):
     '''bootstrap.redl_bootstrap with the internal solver's settings at the interior nodes x[1:-1], with the
     geometry of the current equilibrium sampled as solve_with_bootstrap(use_python_solve=True) samples it.
     Gradients are taken as the solver takes them (on psi in its node order, 0 at the LCFS, without the LCFS
-    node) or as solve_with_bootstrap does (on all of x, divided by the flux range).'''
+    node) or as solve_with_bootstrap does (on all of x, divided by the flux range). ion_charge_model 2 (main-ion
+    charge 1 in nu_i* and ln Lambda_ii) is ion_collisionality_model 'unity' with the 'unity' ion logarithm.'''
+    ion_ln, ion_nu = ('unity', 'unity') if ion_charge_model == 2 else ('Zavg', 'Zavg_Zeff')
     from OpenFUSIONToolkit.TokaMaker.bootstrap import redl_bootstrap, calculate_ln_lambda
     xi = x[1:-1]
     _, f, _, _, pp = mygs.get_profiles(psi=xi)
@@ -48,13 +50,13 @@ def _python_bootstrap(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None, ln_lambda='NRL',
     dTe, dTi, dne, dnit = grad(Te), grad(Ti), grad(ne), grad(nit)
     Te, Ti, ne, ni, nit, Zeff = Te[1:-1], Ti[1:-1], ne[1:-1], ni[1:-1], nit[1:-1], Zeff[1:-1]
     ln_le, ln_lii = calculate_ln_lambda(Te, Ti, ne, ni, Zeff, electron_lnLambda_model=ln_lambda,
-                                        ion_lnLambda_model='Zavg')
+                                        ion_lnLambda_model=ion_ln)
     jdotB, coeffs = redl_bootstrap(psi_N=xi, Te=Te, Ti=Ti, ne=ne, ni=ni, pe=EC*ne*Te, pi=EC*nit*Ti, Zeff=Zeff,
                                    R=R_geo, q=np.abs(q), eps=eps, fT=1.0 - fc, I_psi=f,
                                    dT_e_dpsi=dTe, dT_i_dpsi=dTi, dn_e_dpsi=dne, dn_i_dpsi=dnit,
                                    dp_dpsi=(ne*dTe + Te*dne + nit*dTi + Ti*dnit)*EC,
                                    ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
-                                   use_legacy_L34=False, use_sign_q=False, ion_collisionality_model='Zavg_Zeff',
+                                   use_legacy_L34=False, use_sign_q=False, ion_collisionality_model=ion_nu,
                                    formula_form='jboot1', coefficient_model=coefficient_model)
     inv_R, B2 = ravgs['<1/R>'], b_avgs[1]
     return {'jdotB_bs_raw': jdotB, 'jphi_bs_raw': jdotB*f*inv_R/B2, 'jphi_pd_raw': pp*(ravgs['<R>'] - f**2*inv_R/B2),
@@ -650,5 +652,268 @@ def test_ITER_bootstrap_sauter_insolve(order):
     assert res['insolve_bs'] < 3.5E-4
     for key in ('fortran_ops', 'fortran_set_rejects', 'fortran_ops_kept', 'reset', 'loaded', 'loaded_invalid',
                 'loaded_old', 'python_solve_models', 'python_solve_rejects'):
+        assert res[key], key
+    assert res['n_removed'] == 1
+
+
+def _sauter_1999_literal(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None):
+    '''The published model of Sauter et al., Phys. Plasmas 6, 2834 (1999), with the Erratum, Phys. Plasmas 9, 5140
+    (2002), transcribed from the papers at the interior nodes x[1:-1] (T in eV, n in m^-3): the Coulomb logarithms
+    of eqs. 18d and 18e and the collisionalities of eqs. 18b and 18c, with the main-ion charge Z_i = 1 in the ion
+    terms (erratum) and Z_eff elsewhere; the coefficients of eqs. 14-17 with Z = Z_eff and the erratum's + sign of
+    the 0.315 term; and the erratum's bootstrap formula, <j.B> = -I p_e [L31 (p/p_e) dln p/dpsi + L32 dln T_e/dpsi
+    + L34 alpha (1-R_pe)/R_pe dln T_i/dpsi]. Nothing of bootstrap.py is used. Not independent of the solver: the
+    geometry (f_t, |q|, eps, the major radius (R_max+R_min)/2, F, <1/R>, <B^2>) is the equilibrium's, the gradients
+    are taken as the solver takes them (dp/dpsi by the product rule), and the ion pressure counts nimp at T_i.'''
+    xi = x[1:-1]
+    _, f, _, _, _ = mygs.get_profiles(psi=xi)
+    _, fc, _, b_avgs, eps = mygs.sauter_fc(psi=xi, return_eps=True)
+    _, q, ravgs, _, _, _ = mygs.get_q(psi=xi)
+    fsa = mygs.get_fsa(psi=xi)
+    R, q = 0.5*(fsa['R_min'] + fsa['R_max']), np.abs(q)
+    psi_a, psi_0 = mygs.psi_bounds
+    nit = ni if nimp is None else ni + nimp
+    psi = psi_a + (1.0 - x[::-1])[1:]*(psi_0 - psi_a)
+
+    def grad(y):
+        return -np.gradient(y[::-1][1:], psi, edge_order=2)[::-1][1:]
+    dTe, dTi, dne, dnit = grad(Te), grad(Ti), grad(ne), grad(nit)
+    Te, Ti, ne, ni, nit, Z = Te[1:-1], Ti[1:-1], ne[1:-1], ni[1:-1], nit[1:-1], Zeff[1:-1]
+    Zi, ft = 1.0, 1.0 - fc
+    ln_Le = 31.3 - np.log(np.sqrt(ne)/Te)  # eq. 18d
+    ln_Lii = 30.0 - np.log(Zi**3*np.sqrt(ni)/Ti**1.5)  # eq. 18e, Z = Z_i
+    nue = 6.921e-18*q*R*ne*Z*ln_Le/(Te**2*eps**1.5)  # eq. 18b
+    nui = 4.90e-18*q*R*ni*Zi**4*ln_Lii/(Ti**2*eps**1.5)  # eq. 18c, Z = Z_i
+
+    def F31(X):  # eq. 14a
+        return (1.0 + 1.4/(Z + 1.0))*X - 1.9/(Z + 1.0)*X**2 + 0.3/(Z + 1.0)*X**3 + 0.2/(Z + 1.0)*X**4
+    L31 = F31(ft/(1.0 + (1.0 - 0.1*ft)*np.sqrt(nue) + 0.5*(1.0 - ft)*nue/Z))  # eq. 14b
+    X = ft/(1.0 + 0.26*(1.0 - ft)*np.sqrt(nue) + 0.18*(1.0 - 0.37*ft)*nue/np.sqrt(Z))  # eq. 15d
+    Y = ft/(1.0 + (1.0 + 0.6*ft)*np.sqrt(nue) + 0.85*(1.0 - 0.37*ft)*nue*(1.0 + Z))  # eq. 15e
+    F32_ee = ((0.05 + 0.62*Z)/(Z*(1.0 + 0.44*Z))*(X - X**4) + 1.0/(1.0 + 0.22*Z)*(X**2 - X**4 - 1.2*(X**3 - X**4))
+              + 1.2/(1.0 + 0.5*Z)*X**4)  # eq. 15b
+    F32_ei = (-(0.56 + 1.93*Z)/(Z*(1.0 + 0.44*Z))*(Y - Y**4)
+              + 4.95/(1.0 + 2.48*Z)*(Y**2 - Y**4 - 0.55*(Y**3 - Y**4)) - 1.2/(1.0 + 0.5*Z)*Y**4)  # eq. 15c
+    L32 = F32_ee + F32_ei  # eq. 15a
+    L34 = F31(ft/(1.0 + (1.0 - 0.1*ft)*np.sqrt(nue) + 0.5*(1.0 - 0.5*ft)*nue/Z))  # eqs. 16a, 16b
+    alpha0 = -1.17*(1.0 - ft)/(1.0 - 0.22*ft - 0.19*ft**2)  # eq. 17a
+    w = nui**2*ft**6
+    alpha = ((alpha0 + 0.25*(1.0 - ft**2)*np.sqrt(nui))/(1.0 + 0.5*np.sqrt(nui)) + 0.315*w)/(1.0 + 0.15*w)  # 17b
+    pe, p = EC*ne*Te, EC*(ne*Te + nit*Ti)
+    dp = EC*(ne*dTe + Te*dne + nit*dTi + Ti*dnit)
+    Rpe = pe/p
+    jdotB = -f*pe*(L31*(p/pe)*(dp/p) + L32*dTe/Te + L34*alpha*(1.0 - Rpe)/Rpe*dTi/Ti)
+    return {'jdotB_bs_raw': jdotB, 'jphi_bs_raw': jdotB*f*ravgs['<1/R>']/b_avgs[1], 'f_t': ft, 'nu_e_star': nue,
+            'nu_i_star': nui}
+
+
+## Smallest accepted change of <j.B> (relative to its peak) between ion_charge_model 1 and 2 on the ITER cases with
+## Z_eff = 1.5: a quarter of the smallest measured (7.6E-3, Sauter coefficients, n_i = n_e); an option that does not
+## reach the evaluation changes nothing
+ION_CHARGE_EFFECT_BOUND = 1.9E-3
+
+
+def run_eval_ion_charge(mesh_resolution, fe_order, mp_q):
+    setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
+    if setup is None:
+        mp_q.put(None)
+        return
+    mygs, x, ne, Te = setup['mygs'], setup['psi_sample'], setup['ne'], setup['Te']
+    n = len(x)
+    zv = setup['Zeff_val']
+    Te_k = Te/1e3
+    ni_c, nimp_c = _carbon_case(ne, zv)
+    results = {}
+    try:
+        # ion_charge_model = 2 against redl_bootstrap with the 'unity' ion charge, with both coefficient sets: on the
+        # ITER profiles (n_i = n_e with the NRL logarithms, carbon with the Sauter 1999 ones, carbon also in the ion
+        # pressure) and over the Sauter scan; f_t, nu_e* and the pressure-driven part equal those of
+        # ion_charge_model = 1 bitwise
+        for bs_model, coefficient_model in ((1, 'redl'), (2, 'sauter')):
+            cases = {'nrl': (ne, Te_k, zv, None, 1, 'NRL'), 'sauter_ln': (ni_c, Te_k, zv, None, 2, 'sauter'),
+                     'imp': (ni_c, Te_k, zv, nimp_c, 1, 'NRL')}
+            for name, (zs, t_scale, n_scale) in SAUTER_SCAN.items():
+                ni_s, nimp_s = _carbon_case(ne*n_scale, zs)
+                cases[name] = (ni_s, Te_k*t_scale, zs, nimp_s, 1, 'NRL')
+            for name, (ni, Te_s, zs, nimp, ln_model, ln_py) in cases.items():
+                ne_s = ne*SAUTER_SCAN[name][2] if name in SAUTER_SCAN else ne
+                tag = f'{coefficient_model}/{name}'
+                kw = dict(nimp=nimp, ln_lambda_model=ln_model, bs_model=bs_model)
+                F = mygs.eval_bootstrap(x, Te_s, Te_s, ne_s, ni, zs, ion_charge_model=2, **kw)
+                F1 = mygs.eval_bootstrap(x, Te_s, Te_s, ne_s, ni, zs, **kw)
+                P = _python_bootstrap(mygs, x, Te_s*1e3, Te_s*1e3, ne_s, ni, np.full(n, zs), nimp=nimp, ln_lambda=ln_py,
+                                      coefficient_model=coefficient_model, ion_charge_model=2)
+                for key in EVAL_KEYS:
+                    results[f'{tag}/{key}'] = _rel(F[key][1:-1], P[key])
+                results[f'{tag}/ln_lambda_min'] = P['ln_lambda_min']
+                results[f'{tag}/shared'] = all(np.array_equal(F[key], F1[key], equal_nan=True)
+                                               for key in ('jphi_pd_raw', 'f_t', 'nu_e_star'))
+                results[f'{tag}/effect'] = _rel(F['jdotB_bs_raw'], F1['jdotB_bs_raw'])
+                results[f'{tag}/effect_nu_i'] = _rel(F['nu_i_star'][1:-1], F1['nu_i_star'][1:-1])
+        # With Z_eff = 1 and n_i = n_e the two options are the same charge: bitwise equal
+        F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ne, 1.0, ion_charge_model=2)
+        F1 = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ne, 1.0)
+        results['zeff1_same'] = all(F[key].tobytes() == F1[key].tobytes() for key in EVAL_KEYS)
+        # The published model (bs_model, ln_lambda_model and ion_charge_model 2) against the transcription of the
+        # papers, on the ITER profiles and over the Sauter scan, all with carbon; with ion_charge_model = 1 it differs
+        for name, (zs, t_scale, n_scale) in dict(iter=(zv, 1.0, 1.0), **SAUTER_SCAN).items():
+            ne_s, Te_s = ne*n_scale, Te_k*t_scale
+            ni_s, nimp_s = _carbon_case(ne_s, zs)
+            kw = dict(nimp=nimp_s, ln_lambda_model=2, bs_model=2)
+            F = mygs.eval_bootstrap(x, Te_s, Te_s, ne_s, ni_s, zs, ion_charge_model=2, **kw)
+            F1 = mygs.eval_bootstrap(x, Te_s, Te_s, ne_s, ni_s, zs, **kw)
+            L = _sauter_1999_literal(mygs, x, Te_s*1e3, Te_s*1e3, ne_s, ni_s, np.full(n, zs), nimp=nimp_s)
+            for key in L:
+                results[f'literal/{name}/{key}'] = _rel(F[key][1:-1], L[key])
+            results[f'literal/{name}/koh'] = _rel(F1['jdotB_bs_raw'][1:-1], L['jdotB_bs_raw'])
+        # Invalid values are rejected in Python; the Fortran entry rejects them too
+        base = dict(psi=x, te=Te_k, ti=Te_k, ne=ne, ni=ne, Zeff=1.5)
+        for name, val in (('3', 3), ('0', 0), ('float', 2.0), ('bool', True), ('string', '2')):
+            results[f'rejects/eval_{name}'] = _rejects(mygs.eval_bootstrap, **dict(base, ion_charge_model=val))
+            results[f'rejects/set_boot_ops_{name}'] = _rejects(mygs.set_boot_ops, ion_charge_model=val)
+        from OpenFUSIONToolkit.TokaMaker._interface import tokamaker_eval_bootstrap
+        eq = mygs._tMaker_equil
+        err = eq._oft_env.get_c_errorbuff()
+        vals = [np.ascontiguousarray(v) for v in (1.0 - x[::-1], Te_k[::-1], Te_k[::-1], ne[::-1], ne[::-1],
+                                                  np.full(n, 1.5), np.zeros(n))]
+        tokamaker_eval_bootstrap(eq.c_ptr, n, *vals, 1, 0, 1, 3, np.zeros((6, n)), err)
+        results['fortran_eval_rejects'] = b'Invalid ion_charge_model' in err.value
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        mp_q.put(None)
+        return
+    mp_q.put([results])
+    oftpy_dump_cov()
+
+
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap_eval_ion_charge(order):
+    '''eval_bootstrap with ion_charge_model = 2 (the main-ion charge, 1, in nu_i* and ln Lambda_ii, as the 2002
+    erratum of Sauter 1999 prescribes for eqs. 18c and 18e) on the ITER equilibrium with H-mode profiles equals
+    bootstrap.redl_bootstrap with ion_collisionality_model = 'unity' and the 'unity' ion logarithm, node by node,
+    with both coefficient sets (bs_model 1 and 2), with both Coulomb logarithms, with a carbon impurity, and at
+    Z_eff 1 and 4 in the plateau and collisional regimes; f_t, nu_e* and the pressure-driven part equal those of
+    ion_charge_model = 1 bitwise, nu_i* and <j.B> differ, and with Z_eff = 1 and n_i = n_e the options are
+    bitwise equal. The published model (bs_model, ln_lambda_model and ion_charge_model 2) equals an independent
+    transcription of the papers (_sauter_1999_literal, which shares only the geometry, the gradients and the ion
+    pressure with the solver), and differs from it with ion_charge_model = 1. Invalid values raise ValueError in
+    Python and an error from the Fortran entry.
+
+    The bound 1E-12 of the peak is that of test_ITER_bootstrap_eval_sauter, for the same reason (the same
+    expressions in a different order and with different math libraries). Measured (GCC, x86): at most 6.2E-16 for
+    every key and case, except jphi_bs_raw in the collisional scan case (5.5E-14 Redl, 8.6E-15 Sauter); against the
+    transcription at most 9.0E-16, except jphi_bs_raw in the collisional case (8.9E-15). The option changes <j.B> by
+    2.2E-2 to 2.5E-2 (Redl) and 7.6E-3 to 8.6E-3 (Sauter) of the peak on the ITER cases (ION_CHARGE_EFFECT_BOUND),
+    by up to 0.48 in the scan, and the published model differs from ion_charge_model = 1 by 8.6E-3 on ITER.
+    '''
+    results = mp_run(run_eval_ion_charge, (1.0, order), timeout=300)
+    assert results is not None
+    res = results[0]
+    for coefficient_model in ('redl', 'sauter'):
+        for name in ('nrl', 'sauter_ln', 'imp', *SAUTER_SCAN):
+            tag = f'{coefficient_model}/{name}'
+            for key in EVAL_KEYS:
+                assert res[f'{tag}/{key}'] < 1.0E-12, f'{tag}/{key}'
+            assert res[f'{tag}/shared'], tag
+        assert res[f'{coefficient_model}/sauter_ln/ln_lambda_min'] > 10.0  # calculate_ln_lambda's floor is inactive
+        for name in ('nrl', 'sauter_ln', 'imp'):
+            assert res[f'{coefficient_model}/{name}/effect'] > ION_CHARGE_EFFECT_BOUND, f'{coefficient_model}/{name}'
+    assert res['zeff1_same']
+    for name in ('iter', *SAUTER_SCAN):
+        for key in ('jdotB_bs_raw', 'jphi_bs_raw', 'f_t', 'nu_e_star', 'nu_i_star'):
+            assert res[f'literal/{name}/{key}'] < 1.0E-12, f'literal/{name}/{key}'
+    assert res['literal/iter/koh'] > ION_CHARGE_EFFECT_BOUND
+    rejects = [key for key in res if key.startswith('rejects/')]
+    assert len(rejects) == 10
+    for key in rejects:
+        assert res[key], key
+    assert res['fortran_eval_rejects']
+
+
+def run_ion_charge_insolve(mesh_resolution, fe_order, mp_q):
+    setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
+    if setup is None:
+        mp_q.put(None)
+        return
+    mygs, x, ne, Te = setup['mygs'], setup['psi_sample'], setup['ne'], setup['Te']
+    Zeff = setup['Zeff_val']
+    ni, _ = _carbon_case(ne, Zeff)
+    kwargs = dict(ffp_prof={'type': 'jphi-split-bootstrap', 'x': x, 'y': setup['inductive_jphi']},
+                  te_prof={'type': 'linterp', 'x': x, 'y': Te/1e3}, ne_prof={'type': 'linterp', 'x': x, 'y': ne},
+                  ti_prof={'type': 'linterp', 'x': x, 'y': Te/1e3}, ni_prof={'type': 'linterp', 'x': x, 'y': ni},
+                  Zeff=Zeff, Ip_target=setup['Ip_target'])
+    results = {}
+    try:
+        import ctypes
+        import h5py
+        from OpenFUSIONToolkit.TokaMaker._interface import (tokamaker_boot_ops_struct, tokamaker_set_boot_ops,
+                                                            tokamaker_get_boot_ops)
+        bp1 = mygs.solve_bootstrap(**kwargs)
+        bp = mygs.solve_bootstrap(**kwargs, ion_charge_model=2)
+        results['insolve_option_effect'] = _rel(bp['jdotB_bs_raw'], bp1['jdotB_bs_raw'])
+        # eval_bootstrap takes the option from the solve and reproduces the solver's last evaluation
+        F = mygs.eval_bootstrap(x, Te/1e3, Te/1e3, ne, ni, Zeff)
+        results['insolve'] = _rel(F['jdotB_bs_raw'], bp['jdotB_bs_raw'])
+        results['insolve_bs'] = _rel(F['jphi_bs_raw'], bp['jphi_bs_raw'])
+        # The option is in the Fortran state; an invalid value from the C interface is refused and changes nothing
+        eq = mygs._tMaker_equil
+        bops, initialized, err = tokamaker_boot_ops_struct(), ctypes.c_bool(False), eq._oft_env.get_c_errorbuff()
+        tokamaker_get_boot_ops(eq.c_ptr, ctypes.byref(bops), ctypes.byref(initialized), err)
+        results['fortran_ops'] = bool(initialized.value and bops.ion_charge_model == 2)
+        bops.ion_charge_model = 3
+        tokamaker_set_boot_ops(eq.c_ptr, ctypes.byref(bops), err)
+        results['fortran_set_rejects'] = b'Invalid ion_charge_model' in err.value
+        bops, err = tokamaker_boot_ops_struct(), eq._oft_env.get_c_errorbuff()
+        tokamaker_get_boot_ops(eq.c_ptr, ctypes.byref(bops), ctypes.byref(initialized), err)
+        results['fortran_ops_kept'] = bool(bops.ion_charge_model == 2)
+        # Saved and loaded with the equilibrium; a file with an invalid value or without it loads the default
+        eq.save_TokaMaker('ITER_boot_ion_charge_test.h5')
+        mygs.boot_reset()
+        results['reset'] = bool(mygs._tMaker_equil._boot_ops['ion_charge_model'] == 1)
+        mygs.replace_eq(source_file='ITER_boot_ion_charge_test.h5')
+        results['loaded'] = bool(mygs._tMaker_equil._boot_ops['ion_charge_model'] == 2)
+        paths = []
+        with h5py.File('ITER_boot_ion_charge_test.h5', 'r+') as fid:
+            fid.visit(lambda name: paths.append(name) if name.endswith('BOOT_OPS/ION_CHARGE_MODEL') else None)
+            for path in paths:
+                fid[path][...] = 7
+        mygs.replace_eq(source_file='ITER_boot_ion_charge_test.h5')
+        results['loaded_invalid'] = bool(mygs._tMaker_equil._boot_ops['ion_charge_model'] == 1)
+        with h5py.File('ITER_boot_ion_charge_test.h5', 'r+') as fid:
+            for path in paths:
+                del fid[path]
+        results['n_removed'] = len(paths)
+        mygs.replace_eq(source_file='ITER_boot_ion_charge_test.h5')
+        os.remove('ITER_boot_ion_charge_test.h5')
+        results['loaded_old'] = bool(mygs._tMaker_equil._boot_ops['ion_charge_model'] == 1)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        mp_q.put(None)
+        return
+    mp_q.put([results])
+    oftpy_dump_cov()
+
+
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap_ion_charge_insolve(order):
+    '''ion_charge_model = 2 reaches the internal solve: the self-consistent ITER bootstrap solve with a carbon
+    impurity differs from the one with ion_charge_model = 1, eval_bootstrap (taking the option from the solve)
+    reproduces the solver's last <j.B> to the level of its freeze tolerance (the bound of
+    test_ITER_bootstrap_eval_insolve, 3E-4 of the peak, and 3.5E-4 for the stored field-aligned part), the option is
+    in the Fortran state and an invalid value from the C interface is refused, boot_reset restores the default, and
+    the option is saved and loaded with the equilibrium, a file with an invalid value or without it loading the
+    default. Measured: the option changes the solve's <j.B> by 2.7E-2 of the peak; eval_bootstrap agrees with the
+    solver's last evaluation to 7.6E-5 (<j.B>) and 9.5E-5 (jphi_bs_raw).
+    '''
+    results = mp_run(run_ion_charge_insolve, (1.0, order), timeout=300)
+    assert results is not None
+    res = results[0]
+    assert res['insolve_option_effect'] > ION_CHARGE_EFFECT_BOUND
+    assert res['insolve'] < 3.0E-4
+    assert res['insolve_bs'] < 3.5E-4
+    for key in ('fortran_ops', 'fortran_set_rejects', 'fortran_ops_kept', 'reset', 'loaded', 'loaded_invalid',
+                'loaded_old'):
         assert res[key], key
     assert res['n_removed'] == 1

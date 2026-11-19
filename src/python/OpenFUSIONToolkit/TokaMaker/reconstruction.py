@@ -66,7 +66,10 @@ con_file_real_format = '.16E'
 
 ## @cond
 def _check_finite(name, value, shape=None):
-    '''Return `value` as a float array, raising `ValueError` unless it is finite (and of `shape`, if given)'''
+    '''Return `value` as a float array, raising `ValueError` unless it is finite (and of `shape`, if given); booleans
+    are not numbers here'''
+    if numpy.asarray(value).dtype == numpy.bool_:
+        raise ValueError("{0} must be numeric".format(name))
     try:
         arr = numpy.asarray(value, dtype=numpy.float64)
     except (TypeError, ValueError):
@@ -499,10 +502,14 @@ class MSE_con:
     The modeled signal at the chord's measurement point is (IMAS coefficient order)
     \f[ \tan \gamma = \frac{c_0 B_Z + c_1 B_R + c_2 B_\phi + c_3 E_R}{c_4 B_Z + c_5 B_R + c_6 B_\phi + c_7 E_R + c_8 E_Z} \f]
     or \f$ \gamma = \arctan(\tan \gamma) \in (-\pi/2, \pi/2) \f$ [rad], with \f$ (B_R, B_\phi, B_Z) \f$ the field in
-    TokaMaker's right-handed \f$ (R, \phi, Z) \f$ frame (the components returned by `get_field_eval('B')`) and the
-    electric field \f$ (E_R, E_Z) \f$ supplied by the caller. Any map from a device's orientation (current or
-    toroidal field direction, sign of the measured angle) to this frame is the caller's statement and belongs in the
-    signs of the coefficients.
+    TokaMaker's right-handed \f$ (R, \phi, Z) \f$ frame, evaluated as for Mirnov sensors (\f$ B_\phi = F(\psi)/R \f$ at
+    the point, with no test of whether the point lies inside the plasma), and the electric field \f$ (E_R, E_Z) \f$
+    supplied by the caller. Any map from a device's orientation (current or toroidal field direction, sign of the
+    measured angle) to this frame is the caller's statement and belongs in the signs of the coefficients.
+
+    Where the denominator changes sign, \f$ \tan \gamma \f$ diverges and \f$ \gamma \f$ jumps by \f$ \pi \f$; a
+    denominator that is exactly zero gives NaN (a failed evaluation in `reconstruct()`, a warning in `eval_error()`).
+    Coefficients and electric fields for which the denominator vanishes identically are rejected.
     '''
     ## Allowed values of `quantity` and their file codes
     quantities = {'tan': 1, 'angle': 2}
@@ -526,19 +533,19 @@ class MSE_con:
             raise ValueError("MSE quantity must be one of {0}".format(tuple(MSE_con.quantities)))
         self.quantity = quantity
         self.loc = None if loc is None else _check_location(loc)
+        self.E_R = float(_check_finite('E_R', E_R, ()))
+        self.E_Z = float(_check_finite('E_Z', E_Z, ()))
         self.coefs = None
         if coefs is not None:
             self.coefs = tuple(float(c) for c in _check_finite('MSE coefficients', coefs, (9,)))
-            if not any(self.coefs[4:]):
-                raise ValueError("MSE denominator coefficients (c_4 ... c_8) must not all be zero")
+            if (not any(self.coefs[4:7])) and (self.coefs[7]*self.E_R + self.coefs[8]*self.E_Z == 0.0):
+                raise ValueError("MSE denominator is identically zero (c_4 = c_5 = c_6 = 0 and c_7 E_R + c_8 E_Z = 0)")
         self.val = None
         if val is not None:
             self.val = float(_check_finite('MSE value', val, ()))
             if (quantity == 'angle') and (abs(self.val) >= numpy.pi/2.):
                 raise ValueError("MSE angle must lie in (-pi/2, pi/2)")
         self.err = None if err is None else _check_error(err)
-        self.E_R = float(_check_finite('E_R', E_R, ()))
-        self.E_Z = float(_check_finite('E_Z', E_Z, ()))
         self.phi = float(_check_finite('phi', phi, ()))
 
     def read(self, file):
@@ -1098,7 +1105,13 @@ class reconstruction():
         tokamaker_recon_err(self._tMaker_obj._tMaker_ptr,c_bool(vacuum),ctypes.byref(self.settings.get_c_struct(self._tMaker_obj._oft_env)),mat_ptr,ctypes.byref(error_flag))
         if error_flag.value != 0:
             raise ValueError("Error evaluation failed with error code {0:d}".format(error_flag.value))
-        return error_mat if not save_to_file else None
+        if save_to_file:
+            return None
+        bad_rows = numpy.flatnonzero(numpy.logical_not(numpy.isfinite(error_mat[:,1])))
+        if bad_rows.shape[0] > 0:
+            oft_warning('Modeled signal is not finite for constraint row(s) {0} (e.g. an MSE denominator of zero)'.format(
+                bad_rows.tolist()))
+        return error_mat
 
     def setup_get_opt(self,fail_factor=1.E2,pp_target_weight=1.E5,opoint_target_weight=1.E2):
         r'''! Setup object for use with general optimization routines, such as `scipy.optimize.minimize`,

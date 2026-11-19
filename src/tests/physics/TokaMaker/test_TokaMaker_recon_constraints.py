@@ -5,13 +5,15 @@
 #------------------------------------------------------------------------------
 # TokaMaker tests: reconstruction constraint types (MSE, finite-length Mirnov, coil currents, used flag,
 # off-mesh report, constraint file precision), checked on the solved ITER reference equilibrium and in pure Python
+import contextlib
+import io
 from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
 from tokamaker_testing import mp_run, solve_ITER_reference
-from OpenFUSIONToolkit.TokaMaker.reconstruction import MSE_con_id, reconstruction
+from OpenFUSIONToolkit.TokaMaker.reconstruction import MSE_con, MSE_con_id, reconstruction
 
 # Measurement points inside the plasma of the ITER reference equilibrium (exact in the constraint file format)
 mse_points = np.array([[5.0, 0.5], [6.0, 0.5], [7.0, 0.5], [7.75, 0.25], [6.5, 1.5]])
@@ -60,19 +62,29 @@ def run_mse_case(mp_q):
         val = 0.1 if quantity == 'tan' else -0.2
         myrecon.add_MSE(mse_points[ipt], mse_coef_sets[icoef], val, 0.01, quantity=quantity,
                         E_R=mse_efields[ie][0], E_Z=mse_efields[ie][1])
+    # Last row: a denominator that is exactly zero (only electric field terms, which cancel), written to the file
+    # without the Python check
+    zero_den = MSE_con()
+    zero_den.loc, zero_den.coefs = (6.0, 0.5), (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0)
+    zero_den.E_R, zero_den.E_Z, zero_den.val, zero_den.err = 1.0E4, -1.0E4, 0.1, 0.01
+    myrecon._mse_cons.append(zero_den)
     myrecon.setup_constraints()
-    err_mat = myrecon.eval_error()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        err_mat = myrecon.eval_error()
     B_eval = mygs.get_field_eval('B').eval(mse_points)
-    mp_q.put([{'err_mat': err_mat, 'B_eval': B_eval}])
+    mp_q.put([{'err_mat': err_mat, 'B_eval': B_eval, 'output': output.getvalue()}])
 
 
 def test_recon_mse_closed_form():
-    '''MSE constraint against the closed form, both quantities, electric field off and on, on a solved equilibrium.
+    '''MSE constraint against the closed form, both quantities, electric field off and on, on a solved equilibrium;
+    a zero denominator gives NaN and a warning.
 
     The reference field is the solver's own: (a) the field components returned by Mirnov constraints at the same
     points (same evaluation path), and (b) `get_field_eval('B')`, which divides by R + 1E-12 and maps the point
     through the cell, so it differs at about 1E-13 relative.
-    Measured: not yet. Provisional bounds: (a) 1E-15 (a few ulp); (b) 3E-12.
+    Measured (release build, 2 threads, 40 cases): (a) 0 (bitwise equal) for tan(gamma) and gamma; (b) 1.1E-13.
+    Bounds: (a) 1E-15 (a few ulp, as the measured difference is zero); (b) 1E-12.
     '''
     results = mp_run(run_mse_case, ())
     assert results is not None
@@ -81,7 +93,10 @@ def test_recon_mse_closed_form():
     npts = mse_points.shape[0]
     B_fit = err_mat[:3*npts, 1].reshape((npts, 3))
     cases = mse_cases()
-    assert err_mat.shape[0] == 3*npts + len(cases)
+    assert err_mat.shape[0] == 3*npts + len(cases) + 1
+    assert np.isnan(err_mat[-1, 0]) and np.isnan(err_mat[-1, 1])
+    assert np.all(np.isfinite(err_mat[:-1, :]))
+    assert 'Modeled signal is not finite for constraint row(s) [{0:d}]'.format(err_mat.shape[0]-1) in results[0]['output']
     for i, (ipt, icoef, ie, quantity) in enumerate(cases):
         row = err_mat[3*npts+i, :]
         E_R, E_Z = mse_efields[ie]
@@ -92,7 +107,7 @@ def test_recon_mse_closed_form():
         else:
             ref_fit, ref_eval, val = np.arctan(tan_fit), np.arctan(tan_eval), -0.2
         assert abs(row[1] - ref_fit) <= 1.E-15*abs(ref_fit)
-        assert abs(row[1] - ref_eval) <= 3.E-12*abs(ref_eval)
+        assert abs(row[1] - ref_eval) <= 1.E-12*abs(ref_eval)
         # Weighted error (value - model)/err, the stored value, and no 3D correction
         assert row[0] == (val - row[1])*100.0
         assert row[2] == val
@@ -102,6 +117,75 @@ def test_recon_mse_closed_form():
         tan_off = mse_formula(B_fit[ipt, :], mse_coef_sets[1], 0.0, 0.0)
         tan_on = mse_formula(B_fit[ipt, :], mse_coef_sets[1], *mse_efields[1])
         assert abs(tan_on - tan_off) > 1.E-3*abs(tan_off)
+
+
+mse_flux_pts = [[8.5, 0.5], [6.25, 4.25], [4.0, 0.5], [6.25, -3.5]]
+mse_shift = 2  # MSE chord whose datum is displaced
+
+
+def run_mse_reconstruct_case(mp_q):
+    mygs, _ = solve_ITER_reference(1.0, 2)
+    if mygs is None:
+        mp_q.put(None)
+        return
+    myrecon = reconstruction(mygs)
+    Ip = mygs.get_stats()['Ip']
+    psi_eval = mygs.get_field_eval('PSI')
+    flux_vals = [2.0*np.pi*psi_eval.eval(np.array(pt))[0] for pt in mse_flux_pts]
+
+    def set_data(mse_vals, rows):
+        '''Plasma current, flux loops and the MSE chords in `rows` (row order: flux loops, Ip, MSE)'''
+        myrecon.reset_constraints()
+        myrecon.set_Ip(Ip, 1.E5)
+        for pt, val in zip(mse_flux_pts, flux_vals):
+            myrecon.add_flux_loop(pt, val, 1.E-2)
+        for i in rows:
+            myrecon.add_MSE(mse_points[i], mse_coef_sets[1], mse_vals[i], 1.E-3)
+
+    # MSE data: the reference equilibrium's signals, one chord displaced by 20 errors
+    all_rows = list(range(mse_points.shape[0]))
+    set_data(np.full(len(all_rows), 0.1), all_rows)
+    myrecon.setup_constraints()
+    mse_data = myrecon.eval_error()[len(mse_flux_pts)+1:, 1].copy()
+    mse_data[mse_shift] += 2.E-2
+    # Fortran driver fitting the magnetic axis radius; every fit starts from the same equilibrium
+    mygs.set_isoflux(None)
+    mygs.set_saddles(None)
+    mygs.set_targets(R0=mygs.o_point[0], V0=mygs.o_point[1])
+    myrecon.settings.fit_Pscale = False
+    myrecon.settings.fitR0 = True
+    eq_start = mygs.copy_eq()
+    fits = {}
+    for case, rows in (('without', [i for i in all_rows if i != mse_shift]), ('with', all_rows)):
+        mygs.replace_eq(eq_start)
+        set_data(mse_data, rows)
+        flag = myrecon.reconstruct(maxits=20)
+        fit_out = np.loadtxt(myrecon.out_file)
+        # All chords evaluated on the fitted equilibrium
+        set_data(mse_data, all_rows)
+        myrecon.setup_constraints()
+        fits[case] = {'flag': flag, 'fit_out': fit_out, 'err_mat': myrecon.eval_error()}
+    mp_q.put([{'fits': fits, 'mse_data': mse_data}])
+
+
+def test_recon_mse_in_reconstruct():
+    '''MSE constraints drive the Fortran reconstruction: with one chord's datum displaced by 20 errors from the
+    reference equilibrium's signal, the fit that uses the chord moves its modeled signal toward the datum, relative to
+    the fit without the chord; the output table holds the MSE rows as `eval_error` evaluates them.
+    Measured (release build, 2 threads): distance of the model from the displaced datum MEASURED_MSE_DIST; output
+    table against `eval_error` MEASURED_MSE_TABLE relative (13 significant digits in the table, rounding up to 5E-13).
+    Bound for the table: 5E-12 relative.
+    '''
+    results = mp_run(run_mse_reconstruct_case, ())
+    assert results is not None
+    fits, mse_data = results[0]['fits'], results[0]['mse_data']
+    row = len(mse_flux_pts) + 1 + mse_shift
+    dist = {case: abs(fit['err_mat'][row, 1] - mse_data[mse_shift]) for case, fit in fits.items()}
+    assert dist['with'] < dist['without']
+    fit_out, err_mat = fits['with']['fit_out'], fits['with']['err_mat']
+    assert fit_out.shape == (err_mat.shape[0], 5)
+    assert np.all(fit_out[:, 0] == np.arange(1, err_mat.shape[0]+1))
+    assert abs(fit_out[row, 2] - err_mat[row, 1]) <= 5.E-12*abs(err_mat[row, 1])
 
 
 def probe_points(loc, norm, length, n_avg):
@@ -353,8 +437,14 @@ def test_recon_mse_file_record(recon):
     ({'loc': None}, 'Location is required'),
     ({'coefs': [1.0]*8}, 'coefficients must have shape'),
     ({'coefs': [1.0]*8 + [np.inf]}, 'coefficients must be finite'),
-    ({'coefs': [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'must not all be zero'),
+    ({'coefs': [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'denominator is identically zero'),
+    ({'coefs': [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0]}, 'denominator is identically zero'),
+    ({'coefs': [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0], 'E_R': 2.0E4, 'E_Z': -2.0E4},
+     'denominator is identically zero'),
     ({'coefs': ['a']*9}, 'coefficients must be numeric'),
+    ({'coefs': [True]*9}, 'coefficients must be numeric'),
+    ({'val': True}, 'MSE value must be numeric'),
+    ({'err': True}, 'Error must be numeric'),
     ({'val': np.nan}, 'MSE value must be finite'),
     ({'val': [0.1, 0.2]}, r'MSE value must have shape \(\)'),
     ({'val': 2.0, 'quantity': 'angle'}, r'angle must lie in'),
@@ -373,6 +463,13 @@ def test_recon_mse_rejects_invalid_input(recon, kwargs, match):
     with pytest.raises(ValueError, match=match):
         recon.add_MSE(**args)
     assert recon._mse_cons == []
+
+
+def test_recon_mse_electric_field_denominator(recon):
+    '''A denominator made of electric field terms only is accepted when those terms do not cancel'''
+    recon.add_MSE([6.0, 0.5], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], 0.1, 0.01, E_R=2.0E4)
+    recon.add_MSE([6.0, 0.5], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0], 0.1, 0.01, E_R=2.0E4, E_Z=-1.0E4)
+    assert len(recon._mse_cons) == 2
 
 
 def test_recon_mse_rejects_invalid_quantity_in_file(recon):

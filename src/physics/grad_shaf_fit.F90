@@ -12,7 +12,7 @@
 !! @ingroup doxy_oft_physics
 !------------------------------------------------------------------------------
 MODULE oft_gs_fit
-USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_nan
+USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_nan, ieee_value, ieee_quiet_nan
 USE oft_base
 USE oft_io, ONLY: hdf5_read, oft_file_exist
 USE oft_mesh_type, ONLY: oft_bmesh, bmesh_findcell
@@ -101,14 +101,14 @@ END TYPE field_constraint
 !---------------------------------------------------------------------------------
 !> Motional Stark effect (MSE) pitch angle constraint
 !!
-!! \f$ \tan \gamma = (c_1 B_Z + c_2 B_R + c_3 B_\phi + c_4 E_R) /
-!! (c_5 B_Z + c_6 B_R + c_7 B_\phi + c_8 E_R + c_9 E_Z) \f$ (IMAS coefficient order),
-!! with the field evaluated as for \ref field_constraint
+!! \f$ \tan \gamma = (c_0 B_Z + c_1 B_R + c_2 B_\phi + c_3 E_R) /
+!! (c_4 B_Z + c_5 B_R + c_6 B_\phi + c_7 E_R + c_8 E_Z) \f$ (IMAS coefficient order; `coefs(k+1)` holds
+!! \f$ c_k \f$), with the field evaluated as for \ref field_constraint
 !---------------------------------------------------------------------------------
 TYPE, EXTENDS(field_constraint) :: mse_constraint
-  INTEGER(i4) :: quantity = 1 !< Measured quantity (1 -> \f$ \tan \gamma \f$, 2 -> \f$ \gamma \f$ [rad])
-  REAL(r8) :: coefs(9) = 0.d0 !< Geometry coefficients (IMAS order)
-  REAL(r8) :: efield(2) = 0.d0 !< Radial and vertical electric field \f$ (E_R, E_Z) \f$ [V/m]
+  INTEGER(4) :: quantity = 1 !< Measured quantity (1 -> \f$ \tan \gamma \f$, 2 -> \f$ \gamma \f$ [rad])
+  REAL(8) :: coefs(9) = 0.d0 !< Geometry coefficients \f$ c_0 \ldots c_8 \f$ (IMAS order)
+  REAL(8) :: efield(2) = 0.d0 !< Radial and vertical electric field \f$ (E_R, E_Z) \f$ [V/m]
 CONTAINS
   !> Evaluate constraint value
   PROCEDURE :: eval => fit_mse_eval
@@ -1536,13 +1536,13 @@ END SUBROUTINE fit_field_locate
 !---------------------------------------------------------------------------------
 SUBROUTINE fit_locate_point(smesh,r,cell,f,nproj,proj_dist)
 CLASS(oft_bmesh), INTENT(in) :: smesh !< Mesh
-REAL(r8), INTENT(inout) :: r(3) !< Location of the point (R, Z, 0); replaced by the boundary node if projected
-INTEGER(i4), INTENT(inout) :: cell !< Cell containing the point (0 on input)
-REAL(r8), INTENT(out) :: f(3) !< Logical coordinates of the point in `cell`
+REAL(8), INTENT(inout) :: r(3) !< Location of the point (R, Z, 0); replaced by the boundary node if projected
+INTEGER(4), INTENT(inout) :: cell !< Cell containing the point (0 on input)
+REAL(8), INTENT(out) :: f(3) !< Logical coordinates of the point in `cell`
 INTEGER(i4), INTENT(inout) :: nproj !< Number of points moved onto the boundary
 REAL(r8), INTENT(inout) :: proj_dist !< Largest distance a point was moved [m]
-REAL(r8) :: rmin,rdiff
-INTEGER(i4) :: i,ip
+REAL(8) :: rmin,rdiff
+INTEGER(4) :: i,ip
 CALL bmesh_findcell(smesh,cell,r,f)
 IF((MINVAL(f)<-1.d-6).OR.(MAXVAL(f)>1.d0+1.d-6))THEN
   ip=0
@@ -1569,13 +1569,13 @@ END SUBROUTINE fit_locate_point
 !---------------------------------------------------------------------------------
 SUBROUTINE fit_bvec_eval(gs,cell,f,r,btmp)
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
-INTEGER(i4), INTENT(in) :: cell !< Cell containing the point
-REAL(r8), INTENT(in) :: f(3) !< Logical coordinates of the point in `cell`
-REAL(r8), INTENT(in) :: r(3) !< Location of the point (R, Z, 0)
-REAL(r8), INTENT(out) :: btmp(3) !< Field \f$ (B_R, B_\phi, B_Z) \f$ [T]
+INTEGER(4), INTENT(in) :: cell !< Cell containing the point
+REAL(8), INTENT(in) :: f(3) !< Logical coordinates of the point in `cell`
+REAL(8), INTENT(in) :: r(3) !< Location of the point (R, Z, 0)
+REAL(8), INTENT(out) :: btmp(3) !< Field \f$ (B_R, B_\phi, B_Z) \f$ [T]
 TYPE(oft_lag_brinterp) :: psi_eval
 TYPE(oft_lag_bginterp) :: psi_geval
-REAL(r8) :: goptmp(3,3),v,psi(1),gpsi(3)
+REAL(8) :: goptmp(3,3),v,psi(1),gpsi(3)
 psi_eval%u=>gs%psi
 CALL psi_eval%setup(gs%device%fe_rep)
 psi_geval%u=>gs%psi
@@ -1599,13 +1599,17 @@ END SUBROUTINE fit_bvec_eval
 FUNCTION fit_mse_eval(self,gs) RESULT(val)
 CLASS(mse_constraint), INTENT(inout) :: self !< Constraint
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
-REAL(r8) :: val !< Modeled \f$ \tan \gamma \f$ or \f$ \gamma \f$
-REAL(r8) :: btmp(3),num,den
+REAL(8) :: val !< Modeled \f$ \tan \gamma \f$ or \f$ \gamma \f$ (NaN if the denominator is zero)
+REAL(8) :: btmp(3),num,den
 IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 CALL fit_bvec_eval(gs,self%cell,self%f,self%r,btmp)
 num = self%coefs(1)*btmp(3) + self%coefs(2)*btmp(1) + self%coefs(3)*btmp(2) + self%coefs(4)*self%efield(1)
 den = self%coefs(5)*btmp(3) + self%coefs(6)*btmp(1) + self%coefs(7)*btmp(2) + self%coefs(8)*self%efield(1) &
   + self%coefs(9)*self%efield(2)
+IF(den==0.d0)THEN ! Undefined: NaN marks the evaluation as failed in the fit (as any NaN constraint value)
+  val = ieee_value(val,ieee_quiet_nan)
+  RETURN
+END IF
 val = num/den
 IF(self%quantity==2)val = ATAN(val)
 END FUNCTION fit_mse_eval

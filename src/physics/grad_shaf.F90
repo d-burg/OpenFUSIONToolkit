@@ -53,6 +53,9 @@ REAL(r8), PARAMETER :: qprof_trace_tol = -1.d0 !< Tracer tolerance override for 
 !! the toroidal flux map and the Sauter factors: 0 contour where supported, 1 field-line tracer (testing only;
 !! the sawtooth reset needs the contour and is skipped)
 INTEGER(i4), PARAMETER :: qprof_backend = 0
+!> Rules for the plasma integrals at the LCFS (setting `lcfs_rule`, see @ref gs_plasma_rule_setup)
+INTEGER(i4), PARAMETER :: gs_lcfs_point_test = 0 !< Test each point of the cell's standard rule
+INTEGER(i4), PARAMETER :: gs_lcfs_cut_cells = 1 !< Cut-cell quadrature (see @ref gs_plasma_cell_rule)
 !------------------------------------------------------------------------------
 !> Interpolation class for uniform source with simple tokamak representation
 !------------------------------------------------------------------------------
@@ -184,6 +187,8 @@ TYPE :: gs_factory
   INTEGER(i4) :: nR0_ramp = 6 !< Number of iterations for R0 ramp if R0 target is used
   INTEGER(i4) :: trace_type = 3 !< Field-line tracer for flux surface tracing, when the contour method is not used
   !! (1: LSODE, 3: Runge-Kutta with steps limited at cell boundaries; see @ref tracing_2d::set_tracer "set_tracer")
+  INTEGER(i4) :: lcfs_rule = gs_lcfs_cut_cells !< Rule for the plasma integrals at the LCFS
+  !! (0: point test, 1: cut-cell quadrature; see @ref gs_plasma_rule_setup)
   INTEGER(i4) :: ncoils = 0 !< Number of coils in device
   INTEGER(i4) :: ncoils_ext = 0 !< Number of external (non-meshed) coils in device
   INTEGER(i4) :: ncoil_regs = 0 !< Number of meshed coil regions in device
@@ -237,7 +242,6 @@ TYPE :: gs_factory
   LOGICAL :: full_domain = .FALSE. !< Solve across full domain (for Solov'ev test cases)
   LOGICAL :: dipole_mode = .FALSE. !< Include modifications for Dipole geometry
   LOGICAL :: mirror_mode = .FALSE. !< Include modifications for Mirror/FRC geometry
-  LOGICAL :: lcfs_cut_cells = .FALSE. !< Integrate plasma terms over the part of each cell inside the LCFS (see @ref gs_plasma_cell_rule)
   LOGICAL :: save_visit = .TRUE. !< Save information for plotting?
   CHARACTER(LEN=OFT_PATH_SLEN) :: coil_file = 'none' !< File containing coil definitions
   CHARACTER(LEN=OFT_PATH_SLEN) :: limiter_file = 'none' !< File non-node limiter points
@@ -1856,9 +1860,9 @@ real(8), allocatable :: rhs_loc(:),cond_fac(:),rop(:)
 real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
 real(8), pointer, dimension(:,:) :: qpts
 real(8), pointer, dimension(:) :: qwts
-integer(4) :: j,m,l,k,nq,ncut_max
+integer(4) :: j,m,l,k,nq,ncut_max,rule
 integer(4), allocatable :: j_lag(:)
-logical :: curved,cut_cells
+logical :: curved,clipped
 type(oft_lag_brinterp), target :: psi_eval,bcross_kappa_fun
 type(oft_lag_bginterp), target :: psi_geval
 type(gs_factory), pointer :: device
@@ -1880,9 +1884,7 @@ END IF
 !---
 mutual=0.d0
 itor=0.d0
-cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
-ncut_max=0
-IF(cut_cells)ncut_max=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points+1)
+CALL gs_plasma_rule_setup(self,rule,ncut_max,clipped)
 !$omp parallel private(j,j_lag,curved,goptmp,v,m,det,pt,psitmp,b_tmp,l,rop,itor_loc,pani,bcross_kappa,gpsitmp) reduction(+:mutual) &
 !$omp private(cut_pts,cut_wts,qpts,qwts,nq) reduction(+:itor)
 allocate(rop(device%fe_rep%nce))
@@ -1893,14 +1895,14 @@ DO j=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(j)/=1)CYCLE
   call device%fe_rep%ncdofs(j,j_lag)
   curved=cell_is_curved(device%fe_rep%mesh,j)
-  CALL gs_plasma_cell_quad(self,j,cut_cells,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
+  CALL gs_plasma_cell_quad(self,j,rule,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
   do m=1,nq
     if(curved.OR.(m==1))call device%fe_rep%mesh%jacobian(j,qpts(:,m),goptmp,v)
     call psi_eval%interp(j,qpts(:,m),goptmp,psitmp)
     pt=device%fe_rep%mesh%log2phys(j,qpts(:,m))
-    IF(cut_cells)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
+    IF(clipped)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
     !---Compute Magnetic Field
-    IF(cut_cells.OR.(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1)))THEN
+    IF(clipped.OR.(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1)))THEN
       IF(self%mode==0)THEN
         itor_loc = self%I%Fp(psitmp(1))*((self%ffp_scale**2)*self%I%f(psitmp(1))+self%ffp_scale*self%I%f_offset)/(pt(1)+gs_epsilon)
       ELSE
@@ -3521,9 +3523,9 @@ real(8), allocatable :: rhs_loc(:,:),cond_fac(:),rop(:),vcache(:)
 real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
 real(8), pointer, dimension(:,:) :: qpts
 real(8), pointer, dimension(:) :: qwts
-integer(4) :: j,m,l,nq,ncut_max
+integer(4) :: j,m,l,nq,ncut_max,rule
 integer(4), allocatable :: j_lag(:)
-logical :: curved,cut_cells,in_plasma
+logical :: curved,clipped,in_plasma
 type(oft_lag_brinterp) :: bcross_kappa_fun
 type(gs_factory), pointer :: device
 t1=omp_get_wtime()
@@ -3550,10 +3552,8 @@ itor_ffp=0.d0
 itor_press=0.d0
 estore=0.d0
 dflux_ffp=0.d0
-!---Cut-cell quadrature at the LCFS (see gs_plasma_cell_rule)
-cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
-ncut_max=0
-IF(cut_cells)ncut_max=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points+1)
+!---Rule for the plasma integrals at the LCFS (see gs_plasma_rule_setup)
+CALL gs_plasma_rule_setup(self,rule,ncut_max,clipped)
 !$omp parallel private(rhs_loc,j_lag,ffp,curved,goptmp,v,m,det,pt,psitmp,l,rop,gop,vcache,bcross_kappa,pani,gpsitmp,fpsi,ppsi) &
 !$omp private(cut_pts,cut_wts,qpts,qwts,nq,in_plasma) &
 !$omp reduction(+:itor_ffp) reduction(+:itor_press) reduction(+:estore) reduction(+:dflux_ffp)
@@ -3571,7 +3571,7 @@ do j=1,device%fe_rep%mesh%nc
     vcache(l) = atmp(j_lag(l))
   END DO
   curved=cell_is_curved(device%fe_rep%mesh,j)
-  CALL gs_plasma_cell_quad(self,j,cut_cells,atmp,cut_pts,cut_wts,nq,qpts,qwts)
+  CALL gs_plasma_cell_quad(self,j,rule,atmp,cut_pts,cut_wts,nq,qpts,qwts)
   IF(nq==0)CYCLE ! No plasma in this cell
   do m=1,nq
     if(curved.OR.(m==1))call device%fe_rep%mesh%jacobian(j,qpts(:,m),goptmp,v)
@@ -3579,7 +3579,7 @@ do j=1,device%fe_rep%mesh%nc
     CALL oft_blag_eval_all(device%fe_rep,j,qpts(:,m),rop)
     ffp=0.d0
     pt=device%fe_rep%mesh%log2phys(j,qpts(:,m))
-    IF(cut_cells)THEN
+    IF(clipped)THEN
       in_plasma=.TRUE. ! Points of the plasma part of the cell
     ELSE
       in_plasma=gs_test_bounds(self,pt)
@@ -3590,7 +3590,7 @@ do j=1,device%fe_rep%mesh%nc
       DO l=1,device%fe_rep%nce
         psitmp=psitmp+vcache(l)*rop(l)
       END DO
-      IF(cut_cells)THEN
+      IF(clipped)THEN
         psitmp=MAX(psitmp,self%plasma_bounds(1)) ! Linearized boundary: flux functions held at their LCFS values
         in_plasma=.TRUE.
       ELSE
@@ -3658,7 +3658,7 @@ dflux_ffp = dflux_ffp*self%psiscale
 device%timing(2)=device%timing(2)+(omp_get_wtime()-t1)
 end subroutine gs_source
 !------------------------------------------------------------------------------
-!> Quadrature rule for the plasma part of a cell (cut-cell quadrature, setting `lcfs_cut_cells`)
+!> Quadrature rule for the plasma part of a cell (cut-cell quadrature, `lcfs_rule` = 1)
 !!
 !! The plasma part of a plasma-region cell is the part where the linear interpolant of
 !! \f$ \psi - \psi_{LCFS} \f$ on the cell's vertices is positive, restricted to the plasma side of the
@@ -3716,19 +3716,48 @@ CALL gs_cut_cell_rule(self%device%fe_rep%quad%np,self%device%fe_rep%quad%pts,sel
   dv,nplanes,hv,npts,pts,wts)
 END SUBROUTINE gs_plasma_cell_rule
 !------------------------------------------------------------------------------
-!> Points and weights for an integral over the plasma part of a plasma-region cell
+!> Rule for the plasma integrals at the LCFS in effect (setting `lcfs_rule`) and what it needs
 !!
-!! Without cut cells (`cut_cells = .FALSE.`) these are the cell's standard rule and the caller tests each point
-!! (@ref gs_test_bounds and \f$ \psi > \psi_{LCFS} \f$); with cut cells they are those of @ref gs_plasma_cell_rule
-!! (the standard rule for cells wholly inside) and every point is in the plasma.
+!! - @ref gs_lcfs_point_test (0): the cell's standard rule, and the caller tests each point
+!!   (@ref gs_test_bounds and \f$ \psi > \psi_{LCFS} \f$).
+!! - @ref gs_lcfs_cut_cells (1, default): the points of @ref gs_plasma_cell_rule, all in the plasma part of the
+!!   cell; integrands are evaluated at \f$ \max(\psi,\psi_{LCFS}) \f$ without a point test.
+!!
+!! The point test is used while the LCFS is not set. Every plasma integral takes its rule from here and its points
+!! from @ref gs_plasma_cell_quad, so a further rule is one more case in these two routines.
 !------------------------------------------------------------------------------
-SUBROUTINE gs_plasma_cell_quad(self,cell,cut_cells,psi_vals,cut_pts,cut_wts,nq,qpts,qwts)
+SUBROUTINE gs_plasma_rule_setup(self,rule,maxpts,clipped)
+CLASS(gs_equil), INTENT(in) :: self !< G-S object
+INTEGER(i4), INTENT(out) :: rule !< Rule in effect
+INTEGER(i4), INTENT(out) :: maxpts !< Size of the point storage for @ref gs_plasma_cell_quad
+LOGICAL, INTENT(out) :: clipped !< Points lie in the plasma part (no point test)?
+rule=self%device%lcfs_rule
+IF(self%plasma_bounds(1)<=-1.d98)rule=gs_lcfs_point_test
+maxpts=0
+clipped=.FALSE.
+SELECT CASE(rule)
+CASE(gs_lcfs_point_test)
+CASE(gs_lcfs_cut_cells)
+  maxpts=gs_cut_cell_maxpts(self%device%fe_rep%quad%np,self%nx_points+1)
+  clipped=.TRUE.
+CASE DEFAULT
+  CALL oft_abort('Invalid value of "lcfs_rule"','gs_plasma_rule_setup',__FILE__)
+END SELECT
+END SUBROUTINE gs_plasma_rule_setup
+!------------------------------------------------------------------------------
+!> Points and weights for an integral over the plasma part of a plasma-region cell (rule from
+!! @ref gs_plasma_rule_setup)
+!!
+!! With the point test these are the cell's standard rule; with cut cells they are those of
+!! @ref gs_plasma_cell_rule (the standard rule for cells wholly inside).
+!------------------------------------------------------------------------------
+SUBROUTINE gs_plasma_cell_quad(self,cell,rule,psi_vals,cut_pts,cut_wts,nq,qpts,qwts)
 CLASS(gs_equil), INTENT(inout) :: self !< G-S object
 INTEGER(i4), INTENT(in) :: cell !< Cell index (plasma region)
-LOGICAL, INTENT(in) :: cut_cells !< Use the cut-cell rule?
+INTEGER(i4), INTENT(in) :: rule !< Rule in effect (from @ref gs_plasma_rule_setup)
 REAL(r8), INTENT(in) :: psi_vals(:) !< \f$ \psi \f$ at all nodes (vertices first)
-REAL(r8), TARGET, INTENT(inout) :: cut_pts(:,:) !< Storage for cut-cell points [3,:]
-REAL(r8), TARGET, INTENT(inout) :: cut_wts(:) !< Storage for cut-cell weights [:]
+REAL(r8), TARGET, INTENT(inout) :: cut_pts(:,:) !< Point storage [3,maxpts]
+REAL(r8), TARGET, INTENT(inout) :: cut_wts(:) !< Weight storage [maxpts]
 INTEGER(i4), INTENT(out) :: nq !< Number of points (0 if the cell has no plasma)
 REAL(r8), POINTER, INTENT(out) :: qpts(:,:) !< Points in logical coordinates [3,nq]
 REAL(r8), POINTER, INTENT(out) :: qwts(:) !< Weights (fractions of the cell) [nq]
@@ -3736,14 +3765,16 @@ LOGICAL :: whole
 nq=self%device%fe_rep%quad%np
 qpts=>self%device%fe_rep%quad%pts
 qwts=>self%device%fe_rep%quad%wts
-IF(.NOT.cut_cells)RETURN
-CALL gs_plasma_cell_rule(self,cell,psi_vals(self%device%fe_rep%mesh%lc(:,cell)),nq,cut_pts,cut_wts,whole)
-IF(whole)THEN
-  nq=self%device%fe_rep%quad%np
-ELSE
-  qpts=>cut_pts
-  qwts=>cut_wts
-END IF
+SELECT CASE(rule)
+CASE(gs_lcfs_cut_cells)
+  CALL gs_plasma_cell_rule(self,cell,psi_vals(self%device%fe_rep%mesh%lc(:,cell)),nq,cut_pts,cut_wts,whole)
+  IF(whole)THEN
+    nq=self%device%fe_rep%quad%np
+  ELSE
+    qpts=>cut_pts
+    qwts=>cut_wts
+  END IF
+END SELECT
 END SUBROUTINE gs_plasma_cell_quad
 !------------------------------------------------------------------------------
 !> Size of the point arrays needed by @ref gs_cut_cell_rule
@@ -4019,8 +4050,8 @@ real(8) :: pt(3),curr_cent(2)
 real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
 real(8), pointer, dimension(:,:) :: qpts
 real(8), pointer, dimension(:) :: qwts
-integer(4) :: i,m,nq
-logical :: cut_cells
+integer(4) :: i,m,nq,rule
+logical :: clipped
 type(gs_factory), pointer :: device
 IF(.NOT.self%has_plasma)THEN
   IF(PRESENT(centroid))centroid = 0.d0
@@ -4042,21 +4073,19 @@ END IF
 !---
 itor=0.d0
 curr_cent=0.d0
-cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
-nq=0
-IF(cut_cells)nq=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points+1)
+CALL gs_plasma_rule_setup(self,rule,nq,clipped)
 ALLOCATE(cut_pts(3,nq),cut_wts(nq)) ! Empty without cut cells
 do i=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(i)/=1)CYCLE
-  CALL gs_plasma_cell_quad(self,i,cut_cells,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
+  CALL gs_plasma_cell_quad(self,i,rule,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
   do m=1,nq
     call device%fe_rep%mesh%jacobian(i,qpts(:,m),goptmp,v)
     call psi_eval%interp(i,qpts(:,m),goptmp,psitmp)
     ! IF(psitmp(1)<self%plasma_bounds(1).OR.psitmp(1)>self%plasma_bounds(2))CYCLE
     pt=device%fe_rep%mesh%log2phys(i,qpts(:,m))
-    IF(cut_cells)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
+    IF(clipped)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
     !---Compute Magnetic Field
-    IF(cut_cells.OR.(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1)))THEN
+    IF(clipped.OR.(gs_test_bounds(self,pt).AND.psitmp(1)>self%plasma_bounds(1)))THEN
       IF(self%mode==0)THEN
         itor_loc = self%I%Fp(psitmp(1))*((self%ffp_scale**2)*self%I%f(psitmp(1))+self%ffp_scale*self%I%f_offset)/(pt(1)+gs_epsilon)
       ELSE
@@ -4759,30 +4788,28 @@ real(8) :: Btor
 real(8), allocatable, target :: cut_pts(:,:),cut_wts(:)
 real(8), pointer, dimension(:,:) :: qpts
 real(8), pointer, dimension(:) :: qwts
-integer(4) :: i,m,nq,ncut_max
-logical :: cut_cells
+integer(4) :: i,m,nq,ncut_max,rule
+logical :: clipped
 type(gs_factory), pointer :: device
 device=>self%device
 !---
 psi_eval%u=>self%psi
 CALL psi_eval%setup(device%fe_rep)
 dflux=0.d0
-cut_cells=device%lcfs_cut_cells.AND.(self%plasma_bounds(1)>-1.d98)
-ncut_max=0
-IF(cut_cells)ncut_max=gs_cut_cell_maxpts(device%fe_rep%quad%np,self%nx_points+1)
+CALL gs_plasma_rule_setup(self,rule,ncut_max,clipped)
 !$omp parallel private(m,pt,goptmp,v,psitmp,Btor,cut_pts,cut_wts,qpts,qwts,nq) reduction(+:dflux)
 allocate(cut_pts(3,ncut_max),cut_wts(ncut_max)) ! Empty without cut cells
 !$omp do
 do i=1,device%fe_rep%mesh%nc
   IF(device%fe_rep%mesh%reg(i)/=1)CYCLE
-  CALL gs_plasma_cell_quad(self,i,cut_cells,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
+  CALL gs_plasma_cell_quad(self,i,rule,psi_eval%vals,cut_pts,cut_wts,nq,qpts,qwts)
   do m=1,nq
     call device%fe_rep%mesh%jacobian(i,qpts(:,m),goptmp,v)
     call psi_eval%interp(i,qpts(:,m),goptmp,psitmp)
     ! IF(psitmp(1)<self%plasma_bounds(1).OR.psitmp(1)>self%plasma_bounds(2))CYCLE
     pt=device%fe_rep%mesh%log2phys(i,qpts(:,m))
-    IF(cut_cells)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
-    IF(cut_cells.OR.(gs_test_bounds(self,pt).AND.(psitmp(1)>self%plasma_bounds(1))))THEN
+    IF(clipped)psitmp(1)=MAX(psitmp(1),self%plasma_bounds(1))
+    IF(clipped.OR.(gs_test_bounds(self,pt).AND.(psitmp(1)>self%plasma_bounds(1))))THEN
       pt(1)=MAX(pt(1),gs_epsilon)
       !---Compute differential toroidal Field
       IF(self%mode==0)THEN

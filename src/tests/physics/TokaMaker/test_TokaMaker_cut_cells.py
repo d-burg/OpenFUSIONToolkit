@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: LGPL-3.0-only
 #------------------------------------------------------------------------------
-# TokaMaker tests: cut-cell quadrature of the plasma integrals at the LCFS (setting `lcfs_cut_cells`)
+# TokaMaker tests: cut-cell quadrature of the plasma integrals at the LCFS (setting `lcfs_rule`)
 import pytest
 import numpy as np
 from tokamaker_testing import (mp_run, validate_dict, ITER_eq_dict, ITER_isoflux_pts, ITER_x_point,
@@ -11,6 +11,7 @@ from tokamaker_testing import (mp_run, validate_dict, ITER_eq_dict, ITER_isoflux
 from OpenFUSIONToolkit import OFT_env
 from OpenFUSIONToolkit._interface import oftpy_dump_cov
 from OpenFUSIONToolkit.TokaMaker import TokaMaker
+from OpenFUSIONToolkit.TokaMaker._core import tokamaker_settings
 from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
 from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 from OpenFUSIONToolkit.TokaMaker.reconstruction import reconstruction
@@ -86,7 +87,7 @@ def check_plasma_integrals(results,keys=None):
     return test_result
 
 
-def run_ITER_eq_cut_cells(fe_order,mp_q):
+def run_ITER_eq_point_test(fe_order,mp_q):
     try:
         create_ITER_mesh()
     except Exception as e:
@@ -96,7 +97,7 @@ def run_ITER_eq_cut_cells(fe_order,mp_q):
     myOFT = OFT_env(nthreads=-1)
     mygs = setup_ITER_gs(myOFT,fe_order)
     set_ITER_constraints(mygs)
-    mygs.settings.lcfs_cut_cells = True
+    mygs.settings.lcfs_rule = 0
     mygs.update_settings()
     try:
         EQ_obj, nl_its = solve_ITER_eq(mygs)
@@ -134,7 +135,7 @@ def run_ITER_edge_case(mesh_resolution,mp_q):
     # P' = 1 - psi_N^4 + 0.3: a finite pressure gradient at the LCFS, as in pedestal profiles
     pp_prof['y'] += 0.3
     mygs.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof)
-    mygs.settings.lcfs_cut_cells = True
+    mygs.settings.lcfs_rule = 1
     mygs.update_settings()
     mygs.init_psi(6.3, 0.56, 2.0, 1.4, 0.0)
     try:
@@ -185,7 +186,7 @@ def run_DIIID_xpoint_pair_cut_cells(mp_q):
     pp_prof = np.array([1.0,1.868,1.758,1.235,0.881,0.75,0.91,1.642,3.084,0.0])
     mygs.set_profiles(ffp_prof={'type': 'linterp', 'x': psi_prof, 'y': ffp_prof},
                       pp_prof={'type': 'linterp', 'x': psi_prof, 'y': pp_prof})
-    mygs.settings.lcfs_cut_cells = True
+    mygs.settings.lcfs_rule = 1
     mygs.update_settings()
     mygs.init_psi(1.7,0.0,0.6,1.7,0.4)
     try:
@@ -199,7 +200,7 @@ def run_DIIID_xpoint_pair_cut_cells(mp_q):
     # (`gs_test_bounds`), against the cut-cell quadrature
     area_fun = (np.array([0.0,1.0]),np.array([1.0,1.0]))
     vol_cut, area_cut = mygs.get_globals()[2], mygs.compute_flux_integral(*area_fun)
-    mygs.settings.lcfs_cut_cells = False
+    mygs.settings.lcfs_rule = 0
     mygs.update_settings()
     vol_pt, area_pt = mygs.get_globals()[2], mygs.compute_flux_integral(*area_fun)
     eq_info['vol_point'] = vol_cut/vol_pt-1.0
@@ -208,23 +209,37 @@ def run_DIIID_xpoint_pair_cut_cells(mp_q):
     oftpy_dump_cov()
 
 
+def test_lcfs_rule_setting():
+    '''`lcfs_rule` defaults to the cut-cell quadrature (1); the point test (0) is the only other value'''
+    settings = tokamaker_settings()
+    assert settings.lcfs_rule == 1
+    for rule in (0, 1):
+        settings.lcfs_rule = rule
+        assert settings.get_c_struct(None).lcfs_rule == rule
+    for rule in (-1, 2, True):
+        settings.lcfs_rule = rule
+        with pytest.raises(ValueError):
+            settings.get_c_struct(None)
+
+
 @pytest.mark.coverage
 @pytest.mark.parametrize("order", (2,3))
-def test_ITER_eq_cut_cells(order):
-    '''The ITER equilibrium of test_ITER_eq solved with `lcfs_cut_cells`: the cut-cell quadrature changes the
-    discrete answer only by the boundary discretization error, so global quantities and the plasma-coil
-    inductances (which use the same quadrature) match the reference values of the default quadrature'''
+def test_ITER_eq_point_test(order):
+    '''The ITER equilibrium of test_ITER_eq solved with the point test at the LCFS (`lcfs_rule = 0`): the
+    quadrature changes the discrete answer only by the boundary discretization error, so global quantities and the
+    plasma-coil inductances (which use the same quadrature) match the reference values of the default cut-cell
+    quadrature'''
     eq_dict = {key: val for key, val in ITER_eq_dict.items() if not key.startswith('fsa_')}
-    results = mp_run(run_ITER_eq_cut_cells,(order,))
+    results = mp_run(run_ITER_eq_point_test,(order,))
     assert validate_dict(results,eq_dict)
 
 
 @pytest.mark.coverage
 def test_ITER_edge_cut_cells():
     '''Free-boundary ITER case with a finite pressure gradient at the LCFS (P' = 1 - psi_N^4 + 0.3, shape
-    targets moved up by 6 cm). With the default point test at the LCFS the source changes by a finite amount
-    whenever a quadrature point crosses the boundary, and this case can end in a period-2 cycle of the Picard
-    iteration instead of converging (which inputs do so depends on the platform). With `lcfs_cut_cells` it must
+    targets moved up by 6 cm). With the point test at the LCFS (`lcfs_rule = 0`) the source changes by a finite
+    amount whenever a quadrature point crosses the boundary, and this case can end in a period-2 cycle of the Picard
+    iteration instead of converging (which inputs do so depends on the platform). With cut cells it must
     converge, agree with the solution on a mesh refined by two, and give plasma integrals that change smoothly
     with psi: in a small vertical tilt of psi no step of the plasma volume stands out from the trend. The fit
     constraint integrals, the reported globals, the flux-function integral and the solved source must also agree
@@ -251,7 +266,7 @@ def test_ITER_edge_cut_cells_reference():
 
 @pytest.mark.coverage
 def test_DIIID_xpoint_pair_cut_cells():
-    '''The X-point pair case of test_TokaMaker_xpoint_cut.py with `lcfs_cut_cells`. The second cut at the active
+    '''The X-point pair case of test_TokaMaker_xpoint_cut.py with cut cells. The second cut at the active
     X-point (across its core axis) removes a patch of private flux that the cut from the O-point alone lets into
     the plasma region; the cut-cell quadrature must apply it too. With both cuts the cut-cell plasma volume and
     area differ from those of the point test on the same psi by 8e-6 and 1.1e-5 (the boundary discretization on

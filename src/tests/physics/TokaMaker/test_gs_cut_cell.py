@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: LGPL-3.0-only
 #------------------------------------------------------------------------------
-# TokaMaker tests: the cut-cell quadrature rule of the plasma integrals (setting `lcfs_cut_cells`)
+# TokaMaker tests: the cut-cell quadrature rule of the plasma integrals (setting `lcfs_rule`)
 #
 # test_gs_cut_cell.F90 writes the rule's points and weights for vertex values swept through every change of the
 # clipped region; the test checks them against independent clipping and for continuity in the swept parameter.

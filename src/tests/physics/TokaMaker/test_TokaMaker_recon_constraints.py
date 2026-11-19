@@ -623,3 +623,23 @@ def test_recon_coil_use_unknown_name(recon):
     with pytest.raises(KeyError, match='without a coil current target'):
         recon.set_coil_currents({'PF1': 1.0, 'PF2': 1.0, 'VS': 1.0}, {'PF1': 1.0, 'PF2': 1.0, 'VS': 1.0},
                                 use={'CS1': False})
+
+
+@pytest.mark.parametrize('use', [True, False])
+def test_recon_add_saddle(recon, use):
+    '''A saddle loop constraint added from Python is written in the record the Fortran loader reads (type 11: two
+    leg locations, toroidal width, value and weight) and read back'''
+    from OpenFUSIONToolkit.TokaMaker.reconstruction import saddle_con_id
+    recon.add_saddle([6.0, 0.5], [6.5, 1.0], 0.25, 0.125, 0.0125, use=use)
+    recon.write_fit_in()
+    with open(recon.con_file) as stream:
+        lines = stream.read().split('\n')
+    assert int(lines[2]) == saddle_con_id
+    assert [float(x) for x in lines[3].split()] == [6.0, 0.5]
+    assert [float(x) for x in lines[4].split()] == [6.5, 1.0]
+    assert float(lines[5]) == 0.25
+    assert [float(x) for x in lines[6].split()] == [0.125, 80.0 if use else -80.0]
+    recon.read_fit_in()
+    restored = recon._saddles[0]
+    assert (restored.pt1, restored.pt2, restored.width) == ((6.0, 0.5), (6.5, 1.0), 0.25)
+    assert (restored.val, restored.err, restored.use) == (0.125, 0.0125, use)

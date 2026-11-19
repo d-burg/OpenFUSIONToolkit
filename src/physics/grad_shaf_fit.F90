@@ -70,6 +70,16 @@ CONTAINS
   PROCEDURE :: eval => fit_coil_eval
 END TYPE coil_constraint
 !---------------------------------------------------------------------------------
+!> Coil total current constraint: the coil's current plus its share of the virtual vertical stability coil
+!---------------------------------------------------------------------------------
+TYPE, EXTENDS(coil_constraint) :: coil_total_constraint
+CONTAINS
+  !> Compute error
+  PROCEDURE :: error => fit_coil_total_error
+  !> Evaluate constraint value
+  PROCEDURE :: eval => fit_coil_total_eval
+END TYPE coil_total_constraint
+!---------------------------------------------------------------------------------
 !> Virtual VSC current constraint
 !---------------------------------------------------------------------------------
 TYPE, EXTENDS(fit_constraint) :: vcont_constraint
@@ -1161,6 +1171,7 @@ CHARACTER(LEN=*), INTENT(in) :: filename !< Needs docs
 TYPE(fit_constraint_ptr), POINTER, INTENT(out) :: cons(:) !< Needs docs
 !---
 TYPE(coil_constraint), POINTER :: coil_con
+TYPE(coil_total_constraint), POINTER :: coil_total_con
 TYPE(field_constraint), POINTER :: field_con
 TYPE(flux_constraint), POINTER :: flux_con
 TYPE(saddle_constraint), POINTER :: saddle_con
@@ -1263,6 +1274,11 @@ DO i=1,n
       READ(io_unit,*,END=300)coil_con%coil
       READ(io_unit,*,END=300)coil_con%val,coil_con%wt
       cons(j)%con=>coil_con
+    CASE(15)
+      ALLOCATE(coil_total_con)
+      READ(io_unit,*,END=300)coil_total_con%coil
+      READ(io_unit,*,END=300)coil_total_con%val,coil_total_con%wt
+      cons(j)%con=>coil_total_con
     CASE(13)
       ALLOCATE(mse_con)
       READ(io_unit,*,END=300)rtmp,mse_con%phi
@@ -1399,6 +1415,25 @@ TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
 val = gs%coil_currs(self%coil)/mu0
 END FUNCTION fit_coil_eval
+!---------------------------------------------------------------------------------
+!> Compute coil total current constraint error, with the sign of \ref fit_coil_error
+!---------------------------------------------------------------------------------
+FUNCTION fit_coil_total_error(self,gs) RESULT(err)
+CLASS(coil_total_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+REAL(8) :: err !< Weighted error (model - value)*weight
+err = (self%eval(gs) - self%val)*self%wt
+END FUNCTION fit_coil_total_error
+!---------------------------------------------------------------------------------
+!> Evaluate coil total current constraint: the coil's current plus its share of the virtual vertical stability
+!! coil [A] (the quantity returned by `tokamaker_get_coil_currents`)
+!---------------------------------------------------------------------------------
+FUNCTION fit_coil_total_eval(self,gs) RESULT(val)
+CLASS(coil_total_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+REAL(8) :: val !< Total coil current [A]
+val = (gs%coil_currs(self%coil) + gs%device%coil_vcont(self%coil)*gs%vcontrol_val)/mu0
+END FUNCTION fit_coil_total_eval
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------

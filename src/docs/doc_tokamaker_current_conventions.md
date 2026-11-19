@@ -111,8 +111,32 @@ term), `ind` (inductive), `fixed`, `saw`: `jphi_total` = `jphi_ind` + `jphi_bs` 
 returns the GS output as `jphi_total`. `jdotB_bs_raw` is the Redl \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$
 behind `jphi_bs_raw`. Options use `jbs` (`scale_jbs`, `isolate_edge_jbs`, `taper_edge_jphi`, `djbs_tol`).
 
+## Bootstrap model of the internal solver
+At each nonlinear iteration `solve_bootstrap` evaluates the Redl et al. (2021) fits in the `jboot1` form of
+Sauter et al. (1999) with \f$ L_{34} = L_{31} \f$ on the profile nodes (Fortran `bootstrap_eval`). The trapped fraction,
+\f$ q \f$, the inverse aspect ratio \f$ \epsilon = (R_{max}-R_{min})/(R_{max}+R_{min}) \f$ and the major radius
+\f$ (R_{max}+R_{min})/2 \f$ of each surface come from one contour pass (`sauter_fc`); the collisionalities use \f$ |q| \f$, and
+\f$ \nu_{i*} \f$ the charge factor \f$ Z^4 = (n_e/n_i) Z_{eff} \f$. The kinetic gradients are taken on the nodes without the
+LCFS, and the values on the LCFS (and on the axis) are extrapolated. `eval_bootstrap` runs the same code on the
+current equilibrium at given surfaces and kinetic profiles, without solving and without changing the equilibrium,
+and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$. Two options
+(`set_boot_ops`, `solve_bootstrap`, `eval_bootstrap`) act on both:
+- `ln_lambda_model`: 1 (default) uses the NRL formulary electron logarithm and the ion logarithm of Sauter et al.
+  (1999) eq. 18e with \f$ Z = \max(n_e/n_i, 1) \f$, both floored at 10; 2 uses Sauter et al. (1999) eqs. 18d and 18e
+  (the same \f$ Z \f$), without a floor, the definitions Redl et al. (2021, section III.D) use with their fits.
+- `imp_pressure`: the ion pressure and its gradient count \f$ n_{imp} = (n_e - n_i)^2/(Z_{eff} n_e - n_i) \f$ at
+  \f$ T_i \f$, the density of the one impurity species that, with main ions of charge 1, gives quasineutrality and
+  \f$ Z_{eff} \f$. The collisionalities and Coulomb logarithms keep the main-ion density. `eval_bootstrap` also takes
+  an impurity density (`nimp`), e.g. the sum over several species.
+
+`bootstrap.redl_bootstrap` is the same formula as an array function. With `formula_form='jboot1'`,
+`use_legacy_L34=False`, `use_sign_q=False`, `ion_collisionality_model='Zavg_Zeff'`, \f$ |q| \f$ and the logarithms of
+`calculate_ln_lambda(..., 'NRL', 'Zavg')` (or `'sauter'`, whose floor of 10 is rarely reached) it equals
+`eval_bootstrap` node by node to round-off, given the same geometry and gradients (`test_TokaMaker_bootstrap_eval.py`).
+Its own defaults differ (`'jB'`, \f$ Z_{eff}^4 \f$, \f$ \ln\Lambda = 17 \f$).
+
 ## Where these are used
-- TokaMaker `jphi_bs_update` / `calculate_bootstrap` (Fortran) and `solve_with_bootstrap(use_python_solve=True)`:
+- TokaMaker `jphi_bs_update` / `bootstrap_eval` (Fortran), `eval_bootstrap` and `solve_with_bootstrap(use_python_solve=True)`:
   the bootstrap enters `jphi_total` by (A7) with \f$ p'G \f$ (`boot_profs['jphi_pd_raw']`); `boot_profs['jdotB_bs_raw']`
   holds the Redl \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$.
 - TokaMaker `jphi_update` / `jphi_bs_update` \f$ I_p \f$ normalisation, the \f$ \alpha \f$ root of
@@ -124,7 +148,9 @@ behind `jphi_bs_raw`. Options use `jbs` (`scale_jbs`, `isolate_edge_jbs`, `taper
 - S. P. Hirshman and D. J. Sigmar, Nucl. Fusion **21**, 1079 (1981): neoclassical currents as
   \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$; Pfirsch-Schlueter current with zero \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$.
 - O. Sauter, C. Angioni and Y. R. Lin-Liu, Phys. Plasmas **6**, 2834 (1999); A. Redl et al.,
-  Phys. Plasmas **28**, 022502 (2021): bootstrap current as \f$ \langle j_\parallel B \rangle \f$.
+  Phys. Plasmas **28**, 022502 (2021): bootstrap current as \f$ \langle j_\parallel B \rangle \f$; collisionalities and
+  Coulomb logarithms (S99 eqs. 18b-18e).
+- J. D. Huba, *NRL Plasma Formulary* (Naval Research Laboratory): electron Coulomb logarithm (`ln_lambda_model` 1).
 - O. Sauter and S. Yu. Medvedev, Comput. Phys. Commun. **184**, 293 (2013): COCOS (IMAS signs and \f$ 2\pi \f$).
 - IMAS.jl `src/physics/currents.jl`, `JparB_2_JtoR`:
   \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle = \frac{1}{f}\frac{\langle B^2 \rangle}{\langle 1/R^2 \rangle}\left(\langle J_t/R \rangle + \frac{dp}{d\psi}\left(1 - \frac{f^2\langle 1/R^2 \rangle}{\langle B^2 \rangle}\right)\right) \f$, i.e. (A6).

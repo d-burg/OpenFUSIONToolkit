@@ -47,6 +47,8 @@ TYPE :: boot_ops
   REAL(r8) :: saw_relax = 1.0_r8 !< Under-relaxation of the jphi_saw update (1 = none)
   REAL(r8) :: saw_ramp = 0.01_r8 !< Reset weight ramps over this q deficit below saw_q_s (0 = hard trigger)
   INTEGER(i4) :: saw_rule = 2 !< Reset rule: 1 = fuse (axis to rho_m, FUSE saw_crash!), 2 = local (each dip, two-sided)
+  INTEGER(i4) :: ln_lambda_model = 1 !< Coulomb logarithms: 1 = NRL (floored at 10), 2 = Sauter 1999 eqs. 18d-18e (see @ref bootstrap_eval)
+  LOGICAL :: imp_pressure = .FALSE. !< Count the impurity density of @ref imp_density in the ion pressure
 END TYPE boot_ops
 !------------------------------------------------------------------------------
 !> Current profiles of the last @ref jphi_bs_update (diagnostics; the update itself uses its own
@@ -156,6 +158,8 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX')
   CALL hdf5_write(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP')
   CALL hdf5_write(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE')
+  CALL hdf5_write(self%boot_ops%ln_lambda_model,filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL')
+  CALL hdf5_write(MERGE(1_i4, 0_i4, self%boot_ops%imp_pressure),filename,path//'/BOOT_OPS/IMP_PRESSURE')
 END IF
 CALL boot_profs_save(self%boot_profs,filename,path//'/BOOT_PROFS')
 END SUBROUTINE jphi_bs_save_hdf5
@@ -227,6 +231,11 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
     CALL hdf5_read(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX',success=success)
     CALL hdf5_read(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP',success=success)
     CALL hdf5_read(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE',success=success)
+  END IF
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL'))THEN
+    CALL hdf5_read(self%boot_ops%ln_lambda_model,filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL',success=success)
+    CALL hdf5_read(int_tmp,filename,path//'/BOOT_OPS/IMP_PRESSURE',success=success)
+    IF(success) self%boot_ops%imp_pressure = (int_tmp/=0)
   END IF
   self%boot_ops%initialized = .TRUE.
 END IF
@@ -1689,7 +1698,8 @@ END SUBROUTINE gradient_
 !------------------------------------------------------------------------------
 !> Bootstrap current (Redl 2021) on the nodes psi_N (bootstrap.py calculate_profiles_and_bootstrap)
 !!
-!! NRL Coulomb logs, Koh ion collisionality, Redl jboot1 (no sign(q) factor: <j.B> is odd in F), L34=L31.
+!! Evaluates the kinetic profiles of `gseq` on the nodes and calls @ref bootstrap_eval with the options
+!! of `self%boot_ops`; the result is also stored in `self%boot_profs` (`_raw` profiles).
 !!
 !! @param gseq    Equilibrium object (must have Te, Ti, ne, ni, Zeff set)
 !! @param n_psi   Number of flux surface samples
@@ -1710,8 +1720,88 @@ REAL(r8), OPTIONAL, INTENT(out) :: ravgs(n_psi,3) !< <R>, <1/R>, <1/R^2> on psi_
 REAL(r8), OPTIONAL, INTENT(out) :: qa(n_psi,2) !< q and dA/dpsi_N on psi_N from the Sauter contour pass (see @ref sauter_fc)
 !---
 INTEGER(i4) :: i
+REAL(r8) :: Te(n_psi), Ti(n_psi), ne(n_psi), ni(n_psi), Zeff(n_psi), nimp(n_psi)
+REAL(r8) :: jdotB(0:n_psi) !< <j_BS.B> with its LCFS/axis values
+REAL(r8) :: pscale
+! Evaluate kinetic profiles on the psi grid; convert Te/Ti from keV to eV
+DO i = 1, n_psi
+  Te(i) = gseq%Te%fp(psi_N(i)) * 1000.0_r8
+  Ti(i) = gseq%Ti%fp(psi_N(i)) * 1000.0_r8
+  ne(i) = gseq%ne%fp(psi_N(i))
+  ni(i) = gseq%ni%fp(psi_N(i))
+  Zeff(i) = gseq%Zeff%fp(psi_N(i))
+END DO
+IF(MAXVAL(Te) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Te) > 500 keV -- profiles should be in keV, not eV')
+IF(MAXVAL(Ti) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Ti) > 500 keV -- profiles should be in keV, not eV')
+! P' as in jphi_bs_update
+pscale = gseq%pax_target/gseq%P%f(gseq%plasma_bounds(2))
+IF(self%boot_ops%imp_pressure)THEN
+  CALL imp_density(n_psi, ne, ni, Zeff, nimp)
+  CALL bootstrap_eval(gseq, n_psi, psi_N, Te, Ti, ne, ni, Zeff, pscale, self%boot_ops%ln_lambda_model, &
+    jdotB, jphi_bs, jphi_pd, ierr, nimp=nimp, ravgs=ravgs, qa=qa, diagnose=self%boot_ops%diagnose_bs)
+ELSE
+  CALL bootstrap_eval(gseq, n_psi, psi_N, Te, Ti, ne, ni, Zeff, pscale, self%boot_ops%ln_lambda_model, &
+    jdotB, jphi_bs, jphi_pd, ierr, ravgs=ravgs, qa=qa, diagnose=self%boot_ops%diagnose_bs)
+END IF
+IF(ierr /= 0)RETURN
+self%boot_profs%jdotB_bs_raw = jdotB
+self%boot_profs%jphi_bs_raw = jphi_bs - jphi_pd
+self%boot_profs%jphi_pd_raw = jphi_pd
+END SUBROUTINE calculate_bootstrap
+!------------------------------------------------------------------------------
+!> Density of one impurity species that, with main ions of charge 1, satisfies quasineutrality and gives
+!! Z_eff: from n_e = n_i + Z n_imp and Z_eff n_e = n_i + Z^2 n_imp, n_imp = (n_e - n_i)^2/(Z_eff n_e - n_i)
+!! (zero where n_i >= n_e)
+!------------------------------------------------------------------------------
+SUBROUTINE imp_density(n, ne, ni, Zeff, nimp)
+INTEGER(i4), INTENT(in) :: n !< Number of points
+REAL(r8), INTENT(in) :: ne(n) !< Electron density [m^-3]
+REAL(r8), INTENT(in) :: ni(n) !< Main-ion density [m^-3]
+REAL(r8), INTENT(in) :: Zeff(n) !< Effective charge
+REAL(r8), INTENT(out) :: nimp(n) !< Impurity density [m^-3]
+nimp = 0.0_r8
+WHERE((ne > ni) .AND. (Zeff*ne > ni)) nimp = (ne - ni)**2/(Zeff*ne - ni)
+END SUBROUTINE imp_density
+!------------------------------------------------------------------------------
+!> Bootstrap current (Redl 2021) of the current equilibrium on the nodes psi_N, from given kinetic
+!! profiles on the nodes
+!!
+!! Redl jboot1 form (no sign(q) factor: <j.B> is odd in F), L34=L31, the Koh multi-species ion
+!! collisionality with deuterium main ions (Z_i^4 = (n_e/n_i) Z_eff), |q|, and the major radius
+!! (R_max+R_min)/2 and inverse aspect ratio of each surface from @ref sauter_fc. Coulomb logarithms
+!! (`ln_lambda_model`): 1 = NRL formulary electron form and the ion form of Sauter 1999 eq. 18e with
+!! Z = max(n_e/n_i,1), both floored at 10; 2 = Sauter 1999 eqs. 18d and 18e (the same Z), no floor.
+!! The main-ion density enters the collisionality and the Coulomb logarithms; the ion pressure and
+!! its gradient also count `nimp` (at T_i) if present. Gradients are taken on the nodes; the LCFS is
+!! not a node, and the values there (and on the axis, if it is a node) are extrapolated.
+!! Neither `gseq` nor any bootstrap profile state is changed.
+!------------------------------------------------------------------------------
+SUBROUTINE bootstrap_eval(gseq, n_psi, psi_N, Te, Ti, ne, ni, Zeff, pscale, ln_lambda_model, &
+  jdotB, jphi_bs, jphi_pd, ierr, nimp, ravgs, qa, ft_out, nu_out, diagnose)
+CLASS(gs_equil), INTENT(inout) :: gseq !< Equilibrium object (not changed)
+INTEGER(i4), INTENT(in) :: n_psi !< Number of nodes
+REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi (OFT convention, 0=LCFS), strictly increasing, psi_N(1)>0
+REAL(r8), INTENT(in) :: Te(n_psi) !< Electron temperature [eV]
+REAL(r8), INTENT(in) :: Ti(n_psi) !< Ion temperature [eV]
+REAL(r8), INTENT(in) :: ne(n_psi) !< Electron density [m^-3]
+REAL(r8), INTENT(in) :: ni(n_psi) !< Main-ion density [m^-3]
+REAL(r8), INTENT(in) :: Zeff(n_psi) !< Effective charge
+REAL(r8), INTENT(in) :: pscale !< Pressure profile scale: P' = pscale*P%fp (pressure-driven part)
+INTEGER(i4), INTENT(in) :: ln_lambda_model !< Coulomb logarithms: 1 = NRL, 2 = Sauter 1999
+REAL(r8), INTENT(out) :: jdotB(0:n_psi) !< <j_BS.B> [T A/m^2], jdotB(0) the LCFS value (extrapolated)
+REAL(r8), INTENT(out) :: jphi_bs(0:n_psi) !< Bootstrap current as TokaMaker jphi = <j_phi> [A/m^2], with jphi_pd
+REAL(r8), INTENT(out) :: jphi_pd(0:n_psi) !< Pressure-driven part of jphi_bs [A/m^2]
+INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 if a gradient or the boundary extrapolation failed (warned)
+REAL(r8), OPTIONAL, INTENT(in) :: nimp(n_psi) !< Impurity density counted in the ion pressure [m^-3]
+REAL(r8), OPTIONAL, INTENT(out) :: ravgs(n_psi,3) !< <R>, <1/R>, <1/R^2> on psi_N from the Sauter pass
+REAL(r8), OPTIONAL, INTENT(out) :: qa(n_psi,2) !< q and dA/dpsi_N on psi_N from the Sauter contour pass (see @ref sauter_fc)
+REAL(r8), OPTIONAL, INTENT(out) :: ft_out(n_psi) !< Trapped particle fraction
+REAL(r8), OPTIONAL, INTENT(out) :: nu_out(n_psi,2) !< Collisionalities nu_e*, nu_i*
+LOGICAL, OPTIONAL, INTENT(in) :: diagnose !< Print a sample of the geometry and collisionality
+!---
+INTEGER(i4) :: i
 REAL(r8) :: psi_abs(n_psi)
-REAL(r8) :: Te(n_psi), Ti(n_psi), ne(n_psi), ni(n_psi), Zeff(n_psi)
+REAL(r8) :: nit(n_psi)      !< Ion density in the pressure: main ions (and impurity)
 REAL(r8) :: pe(n_psi), pi_arr(n_psi)
 REAL(r8) :: f(n_psi)        !< I(psi) = R*Bt [T*m]
 REAL(r8) :: fc(n_psi)       !< Circulating fraction
@@ -1729,23 +1819,12 @@ REAL(r8) :: ln_le(n_psi), ln_lii(n_psi), Z_lnLam(n_psi)
 REAL(r8) :: Zavg(n_psi), Zion(n_psi)
 REAL(r8) :: nu_i_star(n_psi), nu_e_star(n_psi)
 REAL(r8) :: jdotB_bs(n_psi)
-REAL(r8) :: jdotB(0:n_psi) !< <j_BS.B> with its LCFS/axis values
-REAL(r8) :: psi_range, Zdom, pscale, pprime
+REAL(r8) :: psi_range, Zdom, pprime
 REAL(r8), PARAMETER :: EC = 1.602176634e-19_r8
 !---
 ! Compute raw psi values from the caller-supplied psi_N grid
 psi_range = gseq%plasma_bounds(2) - gseq%plasma_bounds(1)
 psi_abs = gseq%plasma_bounds(1) + psi_N * psi_range
-! Evaluate kinetic profiles on the psi grid; convert Te/Ti from keV to eV
-DO i = 1, n_psi
-  Te(i) = gseq%Te%fp(psi_N(i)) * 1000.0_r8
-  Ti(i) = gseq%Ti%fp(psi_N(i)) * 1000.0_r8
-  ne(i) = gseq%ne%fp(psi_N(i))
-  ni(i) = gseq%ni%fp(psi_N(i))
-  Zeff(i) = gseq%Zeff%fp(psi_N(i))
-END DO
-IF(MAXVAL(Te) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Te) > 500 keV -- profiles should be in keV, not eV')
-IF(MAXVAL(Ti) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Ti) > 500 keV -- profiles should be in keV, not eV')
 ! Get I(psi) = R*Bt = F(psi) profile on the psi_N grid
 DO i = 1, n_psi
   f(i) = gs_fpol(gseq, psi_abs(i))
@@ -1756,14 +1835,16 @@ IF(PRESENT(ravgs))ravgs = RESHAPE([r_avgs_saut(:,1:2), invr2], [n_psi,3])
 B_avg = modb_avgs_saut(:,1)
 ! ===================================================================
 ft = 1.0_r8 - fc
-! Pressures [Pa]
+! Pressures [Pa]; the ion pressure counts the impurity if given
+nit = ni
+IF(PRESENT(nimp))nit = ni + nimp
 pe = EC * ne * Te
-pi_arr = EC * ni * Ti
+pi_arr = EC * nit * Ti
 ! Gradients d/dpsi [Wb^-1]
 CALL gradient_(n_psi, psi_abs, Te, dT_e_dpsi, ierr)
 IF(ierr == 0)CALL gradient_(n_psi, psi_abs, Ti, dT_i_dpsi, ierr)
 IF(ierr == 0)CALL gradient_(n_psi, psi_abs, ne, dn_e_dpsi, ierr)
-IF(ierr == 0)CALL gradient_(n_psi, psi_abs, ni, dn_i_dpsi, ierr)
+IF(ierr == 0)CALL gradient_(n_psi, psi_abs, nit, dn_i_dpsi, ierr)
 IF(ierr /= 0)RETURN
 ! In the Fortran internal convention psi increases LCFS->axis (opposite to the
 ! standard Sauter/Redl derivation where psi increases axis->LCFS).  Negate
@@ -1772,16 +1853,22 @@ dT_e_dpsi = -dT_e_dpsi
 dT_i_dpsi = -dT_i_dpsi
 dn_e_dpsi = -dn_e_dpsi
 dn_i_dpsi = -dn_i_dpsi
-! Coulomb logarithms (NRL formulary)
-! Electron: ne divided by 1e6 to convert m^-3 -> cm^-3
-ln_le = 23.5_r8 &
-      - LOG(SQRT(ne/1.0e6_r8) * Te**(-1.25_r8)) &
-      - SQRT(1.0e-5_r8 + (LOG(Te) - 2.0_r8)**2 / 16.0_r8)
-! Ion: constant 30 absorbs the m^-3 -> cm^-3 conversion
 Z_lnLam = MAX(ne/ni, 1.0_r8)
-ln_lii = 30.0_r8 - LOG(Z_lnLam**3 * SQRT(ni) / Ti**1.5_r8)
-ln_le  = MAX(ln_le,  10.0_r8)
-ln_lii = MAX(ln_lii, 10.0_r8)
+IF(ln_lambda_model == 2)THEN
+  ! Coulomb logarithms of Sauter et al., Phys. Plasmas 6, 2834 (1999), eqs. 18d and 18e (n in m^-3, T in eV)
+  ln_le = 31.3_r8 - LOG(SQRT(ne) / Te)
+  ln_lii = 30.0_r8 - LOG(Z_lnLam**3 * SQRT(ni) / Ti**1.5_r8)
+ELSE
+  ! Coulomb logarithms (NRL formulary)
+  ! Electron: ne divided by 1e6 to convert m^-3 -> cm^-3
+  ln_le = 23.5_r8 &
+        - LOG(SQRT(ne/1.0e6_r8) * Te**(-1.25_r8)) &
+        - SQRT(1.0e-5_r8 + (LOG(Te) - 2.0_r8)**2 / 16.0_r8)
+  ! Ion: constant 30 absorbs the m^-3 -> cm^-3 conversion
+  ln_lii = 30.0_r8 - LOG(Z_lnLam**3 * SQRT(ni) / Ti**1.5_r8)
+  ln_le  = MAX(ln_le,  10.0_r8)
+  ln_lii = MAX(ln_lii, 10.0_r8)
+END IF
 ! Ion collisionality: Koh multi-species model
 Zdom = 1.0_r8    ! dominant ion charge (deuterium)
 Zavg = ne / ni
@@ -1792,15 +1879,13 @@ nu_i_star = 4.90e-18_r8 * ABS(qvals) * R_geo * ni &
 nu_e_star = 6.921e-18_r8 * ABS(qvals) * R_geo * ne &
           * Zeff * ln_le / (Te**2 * eps**1.5_r8)
 ! Compute bootstrap current via Redl 2021
-CALL redl_bootstrap(n_psi, Te, Ti, ne, ni, pe, pi_arr, Zeff, eps, ft, f, &
+CALL redl_bootstrap(n_psi, Te, Ti, ne, nit, pe, pi_arr, Zeff, eps, ft, f, &
     dT_e_dpsi, dT_i_dpsi, dn_e_dpsi, dn_i_dpsi, &
     nu_e_star, nu_i_star, jdotB_bs)
 ! Convert <j_BS.B> to TokaMaker's jphi = <j_phi> = <R>P' + <1/R>FF'/mu0 (exact, see
 ! doc_tokamaker_current_conventions.md eq. A7): the field-aligned part F<1/R>/<B^2> * <j_BS.B>,
 ! plus the pressure-driven (diamagnetic + Pfirsch-Schlueter) part P'(<R> - F^2<1/R>/<B^2>),
 ! which is assigned to the bootstrap (as IMAS includes_bootstrap=true); boot_profs report it apart.
-! P' as in jphi_bs_update.
-pscale = gseq%pax_target/gseq%P%f(gseq%plasma_bounds(2))
 jphi_bs(0) = 0.0_r8 ! LCFS value set by the extrapolation below
 jphi_pd(0) = 0.0_r8
 DO i = 1, n_psi
@@ -1818,10 +1903,10 @@ CALL finish(jphi_bs)
 IF(ierr == 0)CALL finish(jphi_pd)
 IF(ierr == 0)CALL finish(jdotB)
 IF(ierr /= 0)RETURN
-self%boot_profs%jdotB_bs_raw = jdotB
-self%boot_profs%jphi_bs_raw = jphi_bs - jphi_pd
-self%boot_profs%jphi_pd_raw = jphi_pd
-IF(self%boot_ops%diagnose_bs)THEN
+IF(PRESENT(ft_out))ft_out = ft
+IF(PRESENT(nu_out))nu_out = RESHAPE([nu_e_star, nu_i_star], [n_psi,2])
+IF(.NOT.PRESENT(diagnose))RETURN
+IF(diagnose)THEN
   WRITE(*,'(A)') '  [calculate_bootstrap] geometry & collisionality sample (i=1,mid,n):'
   WRITE(*,'(A,3ES12.4)') '    <R>      : ', r_avgs_saut(1,1), r_avgs_saut(n_psi/2,1), r_avgs_saut(n_psi,1)
   WRITE(*,'(A,3ES12.4)') '    <1/R>    : ', r_avgs_saut(1,2), r_avgs_saut(n_psi/2,2), r_avgs_saut(n_psi,2)
@@ -1839,7 +1924,7 @@ REAL(r8), INTENT(inout) :: a(0:n_psi)
 WHERE(.NOT.(ABS(a) < 1.0e99_r8)) a = 0.0_r8
 CALL extrap_jbs_boundaries(n_psi, psi_N, a, ierr)
 END SUBROUTINE finish
-END SUBROUTINE calculate_bootstrap
+END SUBROUTINE bootstrap_eval
 !------------------------------------------------------------------------------
 !> Edge spike of a bootstrap profile (OFT convention), as isolate_edge_jbs in
 !! bootstrap.py calculate_profiles_and_bootstrap

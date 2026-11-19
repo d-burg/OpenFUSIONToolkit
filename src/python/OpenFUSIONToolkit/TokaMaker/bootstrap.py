@@ -626,6 +626,12 @@ def redl_bootstrap(
 ):
     r'''! Bootstrap current via Redl et al., Phys. Plasmas 28, 022502 (2021)
 
+    The internal solver (@ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap",
+    @ref TokaMaker.TokaMaker.eval_bootstrap "eval_bootstrap") evaluates this formula with
+    `formula_form='jboot1'`, `use_legacy_L34=False`, `use_sign_q=False`, `ion_collisionality_model='Zavg_Zeff'`,
+    \f$|q|\f$, and the Coulomb logarithms of `calculate_ln_lambda(..., 'NRL', 'Zavg')`. The defaults here
+    differ (`'jB'`, \f$Z_{eff}^4\f$, \f$\ln\Lambda = 17\f$), which changes the current by several percent.
+
     @param psi_N Normalized poloidal flux profile \f$\hat{\psi}\f$
     @param Te Electron temperature profile \f$T_e\f$ [eV]
     @param Ti Ion temperature profile \f$T_i\f$ [eV]
@@ -648,7 +654,8 @@ def redl_bootstrap(
     @param ln_lambda_ii Ion Coulomb logarithm \f$\ln\Lambda_{ii}\f$
     @param use_legacy_L34 Use legacy L34 formula (see Redl Eq. 19)
     @param use_sign_q Multiply by sign of \f$q\f$
-    @param ion_collisionality_model Model for ion collisionality ('Zeff', 'Koh', 'unity')
+    @param ion_collisionality_model Charge factor \f$Z^4\f$ of the ion collisionality: 'Zeff' (\f$Z_{eff}^4\f$),
+    'Koh' (\f$Z_{eff}\f$), 'Zavg_Zeff' (\f$(n_e/n_i) Z_{eff}\f$, the internal solver's form) or 'unity' (1)
     @param formula_form Use 'jB' (default) or 'jboot1' equation
     @param Zeff_override Override \f$Z_{eff}\f$ if set
     @param nu_e_star_override Override electron collisionality if set
@@ -687,6 +694,9 @@ def redl_bootstrap(
     else:
         if ion_collisionality_model == 'Koh':
             nu_i_star = (4.90e-18 * q * R * ni * Zeff * ln_lambda_ii
+                         / (Ti**2 * eps**1.5))
+        elif ion_collisionality_model == 'Zavg_Zeff':
+            nu_i_star = (4.90e-18 * q * R * ni * (ne / ni) * Zeff * ln_lambda_ii
                          / (Ti**2 * eps**1.5))
         elif ion_collisionality_model == 'unity':
             nu_i_star = (4.90e-18 * q * R * ni * 1.0 * ln_lambda_ii

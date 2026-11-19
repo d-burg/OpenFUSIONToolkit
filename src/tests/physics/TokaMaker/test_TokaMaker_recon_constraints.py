@@ -244,7 +244,8 @@ def test_recon_finite_probe():
     `get_field_eval('B')` at the points (about 1E-13 relative, see `test_recon_mse_closed_form`), (c) one averaging
     point is the point probe exactly, (d) zero length gives the point probe to round-off, and (e) the averaging
     changes the signal by much more than the bounds.
-    Measured: not yet. Provisional bounds: (a) 1E-15 relative; (b) 3E-12 relative.
+    Measured (release build, 2 threads): (a) 0 (bitwise equal); (b) 2.0E-13; (c) and (d) 0; (e) 1.2E-4 to 2.1E-2.
+    Bounds: (a) 1E-15 relative (a few ulp, as the measured difference is zero); (b) 2E-12 relative.
     '''
     results = mp_run(run_finite_probe_case, ())
     assert results is not None
@@ -264,7 +265,7 @@ def test_recon_finite_probe():
         i += n_avg
     assert i == err_mat.shape[0]
     for j in range(4):
-        assert abs(finite[j] - B_means[j]) <= 3.E-12*abs(B_means[j])
+        assert abs(finite[j] - B_means[j]) <= 2.E-12*abs(B_means[j])
     assert finite[3] == center[3]
     assert abs(finite[4] - center[4]) <= 2.3E-16*abs(center[4])
 
@@ -510,6 +511,8 @@ def test_recon_finite_probe_round_trip(recon):
     ({'length': 0.1, 'n_avg': 0}, 'integer >= 1'),
     ({'length': 0.1, 'n_avg': 2.5}, 'integer >= 1'),
     ({'length': 0.1, 'n_avg': True}, 'integer >= 1'),
+    ({'length': True, 'n_avg': 5}, 'Mirnov length must be numeric'),
+    ({'length': 0.1, 'n_avg': 5, 'norm': None}, 'need a normal'),
     ({'length': 0.1, 'n_avg': 5, 'norm': [0.0, 1.0, 0.0]}, 'nonzero poloidal'),
     ({'length': 0.1, 'n_avg': 5, 'norm': [np.nan, 0.0, 1.0]}, 'Mirnov normal must be finite'),
 ])

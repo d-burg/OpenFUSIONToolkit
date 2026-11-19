@@ -124,11 +124,11 @@ END TYPE mse_constraint
 !! by +90 degrees in the R-Z plane) for `length` < 0.
 !---------------------------------------------------------------------------------
 TYPE, EXTENDS(field_constraint) :: flfield_constraint
-  INTEGER(i4) :: npts = 1 !< Number of averaging points
-  REAL(r8) :: length = 0.d0 !< Signed probe length [m]
-  INTEGER(i4), POINTER, DIMENSION(:) :: cells => NULL() !< Cells containing the averaging points
-  REAL(r8), POINTER, DIMENSION(:,:) :: fs => NULL() !< Logical coordinates of the averaging points
-  REAL(r8), POINTER, DIMENSION(:,:) :: pts => NULL() !< Averaging points (R, Z, 0)
+  INTEGER(4) :: npts = 1 !< Number of averaging points
+  REAL(8) :: length = 0.d0 !< Signed probe length [m]
+  INTEGER(4), POINTER, DIMENSION(:) :: cells => NULL() !< Cells containing the averaging points
+  REAL(8), POINTER, DIMENSION(:,:) :: fs => NULL() !< Logical coordinates of the averaging points
+  REAL(8), POINTER, DIMENSION(:,:) :: pts => NULL() !< Averaging points (R, Z, 0)
 CONTAINS
   !> Evaluate constraint value
   PROCEDURE :: eval => fit_flfield_eval
@@ -1626,16 +1626,16 @@ END SUBROUTINE fit_mse_setup_comp
 FUNCTION fit_flfield_eval(self,gs) RESULT(val)
 CLASS(flfield_constraint), INTENT(inout) :: self !< Constraint
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
-REAL(r8) :: val !< Modeled signal
-INTEGER(i4) :: k
-REAL(r8) :: btmp(3)
+REAL(8) :: val !< Modeled signal
+INTEGER(4) :: k
+REAL(8) :: btmp(3)
 IF(.NOT.ASSOCIATED(self%cells))CALL fit_flfield_locate(self,gs)
 val=0.d0
 DO k=1,self%npts
   CALL fit_bvec_eval(gs,self%cells(k),self%fs(:,k),self%pts(:,k),btmp)
   val=val+DOT_PRODUCT(btmp,self%v)
 END DO
-val=val/REAL(self%npts,r8)
+val=val/REAL(self%npts,8)
 END FUNCTION fit_flfield_eval
 !---------------------------------------------------------------------------------
 !> Place and locate the averaging points of a finite-length probe (off-mesh points are projected)
@@ -1643,8 +1643,8 @@ END FUNCTION fit_flfield_eval
 SUBROUTINE fit_flfield_locate(self,gs)
 CLASS(flfield_constraint), INTENT(inout) :: self !< Constraint
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
-INTEGER(i4) :: k
-REAL(r8) :: t(2),tnorm,s
+INTEGER(4) :: k
+REAL(8) :: t(2),tnorm,s
 IF(ASSOCIATED(self%cells))RETURN
 ALLOCATE(self%cells(self%npts),self%fs(3,self%npts),self%pts(3,self%npts))
 t=0.d0
@@ -1657,7 +1657,7 @@ IF(tnorm>0.d0)THEN
   END IF
 END IF
 DO k=1,self%npts
-  s=(REAL(k-1,r8)-0.5d0*REAL(self%npts-1,r8))*ABS(self%length)/REAL(self%npts,r8)
+  s=(REAL(k-1,8)-0.5d0*REAL(self%npts-1,8))*ABS(self%length)/REAL(self%npts,8)
   self%pts(:,k)=[self%r(1)+s*t(1),self%r(2)+s*t(2),0.d0]
   self%cells(k)=0
   CALL fit_locate_point(gs%device%mesh,self%pts(:,k),self%cells(k),self%fs(:,k),self%nproj,self%proj_dist)

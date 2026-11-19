@@ -159,10 +159,11 @@ class Mirnov_con:
             if isinstance(n_avg, (bool, numpy.bool_)) or (not isinstance(n_avg, (int, numpy.integer))) or (n_avg < 1):
                 raise ValueError("Mirnov `n_avg` must be an integer >= 1")
             n_avg = int(n_avg)
-            if norm is not None:
-                norm_chk = _check_finite('Mirnov normal', norm, (3,))
-                if (length != 0.0) and (norm_chk[0] == 0.0) and (norm_chk[2] == 0.0):
-                    raise ValueError("Finite-length Mirnov sensors need a nonzero poloidal (R, Z) normal component")
+            if norm is None:
+                raise ValueError("Finite-length Mirnov sensors need a normal")
+            norm_chk = _check_finite('Mirnov normal', norm, (3,))
+            if (length != 0.0) and (norm_chk[0] == 0.0) and (norm_chk[2] == 0.0):
+                raise ValueError("Finite-length Mirnov sensors need a nonzero poloidal (R, Z) normal component")
         self.loc = loc
         self.phi = phi
         self.norm = norm

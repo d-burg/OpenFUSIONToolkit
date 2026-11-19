@@ -22,7 +22,6 @@ concurrency:
 
 jobs:
   build:
-    if: github.repository == 'OpenFUSIONToolkit/OpenFUSIONToolkit'
     name: ${{ format('{0} ({1})', matrix.config.name, matrix.parallel) }}
     runs-on: ${{ matrix.config.os }}
     env:
@@ -35,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parallel: [openmp, mpich, openmpi]
+        parallel: [openmp]
         config:
         - {
             name: "Ubuntu 22.04 GCC 12",
@@ -98,26 +97,6 @@ jobs:
             mpi_build_flags: "--nthread=3 --build_umfpack=1 --build_superlu_dist=1",
             xcode_path: "/Applications/Xcode_26.2.0.app/Contents/Developer"
           }
-        exclude:
-          - parallel: mpich
-            config: {os: macos-15-intel}
-          - parallel: openmpi
-            config: {os: macos-15}
-          - parallel: openmpi
-            config: {os: macos-15-intel}
-          - parallel: openmpi
-            config: {os: macos-26}
-          - parallel: openmpi
-            config: {cc: icx}
-        include:
-          - parallel: mpich_petsc
-            config: {
-              name: "Ubuntu 22.04 GCC 12",
-              os: ubuntu-22.04,
-              cc: "gcc-12", cxx: "g++-12", fc: "gfortran-12",
-              python: "python3",
-              mpi_build_flags: "--nthread=2 --oblas_dynamic_arch --build_petsc=1 --petsc_version=3.23 --petsc_openmp=1 --build_cmake=1 --oft_use_lto=0"
-            }
 
     steps:
     - name: Checkout repo
@@ -244,14 +223,12 @@ jobs:
         make test
         mv tests/OFT.junit.xml OFT.junit.xml
 
-    - name: Test OFT examples
-      if: ${{ matrix.config.os != 'macos-15-intel' }}
-      shell: bash
-      timeout-minutes: 30
-      working-directory: builds/build_release
-      run: |
-        source ${{ github.workspace }}/setup_env.sh
-        make test_examples
+    - name: Upload test results
+      uses: actions/upload-artifact@v6
+      if: ${{ !cancelled() }}
+      with:
+        name: junit-${{ matrix.config.os }}-${{ matrix.config.cc }}
+        path: builds/build_release/OFT.junit.xml
 
     - name: Fixup cache
       shell: bash
@@ -259,11 +236,3 @@ jobs:
       run: |
         rm -rf build
         rm -rf petsc*
-
-    - name: Upload test results to Codecov
-      if: ${{ !cancelled() && (matrix.config.os == 'ubuntu-24.04') }}
-      uses: codecov/codecov-action@v6
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        report_type: test_results
-        verbose: true

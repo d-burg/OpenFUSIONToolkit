@@ -141,6 +141,19 @@ _BOOT_OPS_DEFAULTS = {
 }
 
 
+def _check_boot_models(ln_lambda_model, imp_pressure):
+    '''! Check the bootstrap model options (not converted: 2.7 or the string "False" are rejected)
+
+    @param ln_lambda_model Coulomb logarithms, the integer 1 or 2
+    @param imp_pressure Count the impurity in the ion pressure, a bool
+    '''
+    if isinstance(ln_lambda_model, (bool, numpy.bool_)) or not isinstance(ln_lambda_model, (int, numpy.integer)) \
+            or ln_lambda_model not in (1, 2):
+        raise ValueError("ln_lambda_model must be the integer 1 (NRL) or 2 (Sauter 1999)")
+    if not isinstance(imp_pressure, (bool, numpy.bool_)):
+        raise ValueError("imp_pressure must be a bool")
+
+
 ## Keyword inputs of @ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap" kept between calls and in saved files
 _BOOT_INPUT_KEYS = ('F0', 'pres_prof', 'p_fixed_prof', 'jphi_fixed_prof', 'jphi_saw_prof', 'coord')
 
@@ -3299,8 +3312,12 @@ class TokaMaker_equilibrium():
           eqs. 18d and 18e (the same Z), no floor (see @ref eval_bootstrap). (Internal default: 1)
         @param imp_pressure Count the impurity in the ion pressure and its gradient, \f$(n_i + n_{imp}) T_i\f$, with
           \f$n_{imp} = (n_e - n_i)^2/(Z_{eff} n_e - n_i)\f$, the one impurity species that with main ions of charge 1
-          gives quasineutrality and \f$Z_{eff}\f$ (zero where \f$n_i \geq n_e\f$). (Internal default: False)
+          gives quasineutrality and \f$Z_{eff}\f$ (zero where \f$n_i \geq n_e\f$ or \f$Z_{eff} n_e \leq n_i\f$).
+          (Internal default: False)
         '''
+        ops = _BOOT_OPS_DEFAULTS if self._boot_ops is None else self._boot_ops
+        _check_boot_models(ops['ln_lambda_model'] if ln_lambda_model is None else ln_lambda_model,
+                           ops['imp_pressure'] if imp_pressure is None else imp_pressure)
         if self._boot_ops is None:
             self._boot_ops = dict(_BOOT_OPS_DEFAULTS)
         for key, val in (('isolate_edge_jbs', isolate_edge_jbs), ('scale_jbs', scale_jbs), ('djbs_tol', djbs_tol),
@@ -3311,8 +3328,6 @@ class TokaMaker_equilibrium():
                          ('ln_lambda_model', ln_lambda_model), ('imp_pressure', imp_pressure)):
             if val is not None:
                 self._boot_ops[key] = type(_BOOT_OPS_DEFAULTS[key])(val)
-        if self._boot_ops['ln_lambda_model'] not in (1, 2):
-            raise ValueError("ln_lambda_model must be 1 (NRL) or 2 (Sauter 1999)")
         if self._boot_ops['saw_q_s'] < 0.0 or self._boot_ops['saw_dq'] <= 0.0 or not (0.0 < self._boot_ops['saw_relax'] <= 1.0) \
                 or self._boot_ops['saw_ramp'] < 0.0 or self._boot_ops['saw_rule'] not in (1, 2):
             raise ValueError("saw options: need saw_q_s >= 0, saw_dq > 0, 0 < saw_relax <= 1, saw_ramp >= 0, saw_rule in (1, 2)")
@@ -3373,45 +3388,67 @@ class TokaMaker_equilibrium():
         point on the LCFS, where the values are extrapolated (as on the axis). Neither the equilibrium nor
         the bootstrap options and profiles of the last solve are changed.
 
-        @param psi Normalized poloidal flux \f$\hat{\psi}\f$ of the flux surfaces (strictly increasing, in [0,1])
+        The pressure-driven part uses the equilibrium's own \f$P'\f$ (`p_scale`), the solve the pressure target;
+        the two are equal after a bootstrap solve. It comes from the equilibrium's pressure, while `<j.B>` comes
+        from the given kinetic profiles: with profiles inconsistent with the equilibrium the result mixes the two.
+        A `ValueError` is raised before the evaluation if an input is not finite, or if on the nodes that are used
+        (all but a point on the LCFS) `te`, `ti`, `ne` or `ni` is not positive, `Zeff < 1` or `nimp < 0`.
+
+        @param psi Normalized poloidal flux \f$\hat{\psi}\f$ of the flux surfaces (finite, strictly increasing, in
+          [0,1], at least 3 points strictly between the axis and the LCFS)
         @param te Electron temperature [keV] on `psi`
         @param ti Ion temperature [keV] on `psi`
         @param ne Electron density [m^-3] on `psi`
         @param ni Main-ion density [m^-3] on `psi`
         @param Zeff Effective charge (scalar or on `psi`)
         @param nimp Impurity density [m^-3] on `psi`, counted in the ion pressure (at \f$T_i\f$) in place of the
-          density of `imp_pressure`
+          density of `imp_pressure` (not with `imp_pressure=False`)
         @param ln_lambda_model Coulomb logarithms, 1 or 2 (see @ref set_boot_ops; default: the value set for the
           solve, else 1)
         @param imp_pressure Count the impurity density of @ref set_boot_ops in the ion pressure (default: the value
           set for the solve, else False)
         @result Dictionary of 1-D numpy arrays on `psi`: `'psi_n'`; `'jdotB_bs_raw'`, `'jphi_bs_raw'` and
           `'jphi_pd_raw'` as in @ref get_boot_profs; `'f_t'` (trapped fraction), `'nu_e_star'` and `'nu_i_star'`
-          (collisionalities), which are NaN on the LCFS
+          (collisionalities), which are NaN on the LCFS (not evaluated) and, on an axis node, their limits
+          \f$f_t = 0\f$ and \f$\nu_* = \infty\f$
         '''
         psi = numpy.asarray(psi, dtype=numpy.float64)
-        if (psi.ndim != 1) or (psi.size < 4) or numpy.any(numpy.diff(psi) <= 0.0) or (psi[0] < 0.0) or (psi[-1] > 1.0):
-            raise ValueError("psi must be 1D, strictly increasing, in [0,1], with at least 4 points")
+        if (psi.ndim != 1) or (psi.size < 4) or (not numpy.all(numpy.isfinite(psi))) \
+                or numpy.any(numpy.diff(psi) <= 0.0) or (psi[0] < 0.0) or (psi[-1] > 1.0):
+            raise ValueError("psi must be 1D, finite, strictly increasing, in [0,1], with at least 4 points")
         n = psi.size
-        profs = []
-        for name, vals in (('te', te), ('ti', ti), ('ne', ne), ('ni', ni), ('Zeff', Zeff),
-                           ('nimp', 0.0 if nimp is None else nimp)):
-            vals = numpy.asarray(vals, dtype=numpy.float64)
-            if (vals.ndim == 0) and (name == 'Zeff' or nimp is None):
-                vals = numpy.full(n, float(vals))
-            if vals.shape != (n,):
-                raise ValueError(f"{name} must be on psi (shape {psi.shape})")
-            profs.append(vals)
+        if (nimp is not None) and (imp_pressure is not None) and (not imp_pressure):
+            raise ValueError("nimp is counted in the ion pressure: it cannot be given with imp_pressure=False")
         ops = _BOOT_OPS_DEFAULTS if self._boot_ops is None else self._boot_ops
         ln_lambda_model = ops['ln_lambda_model'] if ln_lambda_model is None else ln_lambda_model
         imp_pressure = ops['imp_pressure'] if imp_pressure is None else imp_pressure
-        if ln_lambda_model not in (1, 2):
-            raise ValueError("ln_lambda_model must be 1 (NRL) or 2 (Sauter 1999)")
+        _check_boot_models(ln_lambda_model, imp_pressure)
         imp_mode = 2 if nimp is not None else (1 if imp_pressure else 0)
         # Fortran nodes: OFT convention (0 = LCFS), increasing
         flip = slice(None, None, -1) if self.psi_convention == 0 else slice(None)
         psi_c = numpy.ascontiguousarray(1.0 - psi[flip] if self.psi_convention == 0 else psi)
-        profs = [numpy.ascontiguousarray(vals[flip]) for vals in profs]
+        if numpy.count_nonzero((psi_c > 0.0) & (psi_c < 1.0)) < 3:
+            raise ValueError("psi must have at least 3 points strictly between the axis and the LCFS")
+        profs = {}
+        for name, vals in (('te', te), ('ti', ti), ('ne', ne), ('ni', ni), ('Zeff', Zeff),
+                           ('nimp', numpy.zeros(n) if nimp is None else nimp)):
+            vals = numpy.asarray(vals, dtype=numpy.float64)
+            if (vals.ndim == 0) and (name == 'Zeff'):
+                vals = numpy.full(n, float(vals))
+            if vals.shape != (n,):
+                raise ValueError(f"{name} must be on psi (shape {psi.shape}; only Zeff may be a scalar)")
+            if not numpy.all(numpy.isfinite(vals)):
+                raise ValueError(f"{name} must be finite")
+            profs[name] = numpy.ascontiguousarray(vals[flip])
+        # Physical values on the nodes that are used (a point on the LCFS is not)
+        used = slice(1, None) if psi_c[0] == 0.0 else slice(None)
+        for name, low, strict in (('te', 0.0, True), ('ti', 0.0, True), ('ne', 0.0, True), ('ni', 0.0, True),
+                                  ('Zeff', 1.0, False), ('nimp', 0.0, False)):
+            vals = profs[name][used]
+            if numpy.any((vals <= low) if strict else (vals < low)):
+                raise ValueError(f"{name} must be {'>' if strict else '>='} {low:g} on the nodes used (all but a point"
+                                 f" on the LCFS); its minimum there is {vals.min():.6g}")
+        profs = [profs[name] for name in ('te', 'ti', 'ne', 'ni', 'Zeff', 'nimp')]
         out = numpy.zeros((6, n), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_eval_bootstrap(self.c_ptr, n, psi_c, *profs, int(ln_lambda_model), imp_mode, out, error_string)

@@ -123,7 +123,7 @@ and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{
 (`set_boot_ops`, `solve_bootstrap`, `eval_bootstrap`) act on both:
 - `ln_lambda_model`: 1 (default) uses the NRL formulary electron logarithm and the ion logarithm of Sauter et al.
   (1999) eq. 18e with \f$ Z = \max(n_e/n_i, 1) \f$, both floored at 10; 2 uses Sauter et al. (1999) eqs. 18d and 18e
-  (the same \f$ Z \f$), without a floor, the definitions Redl et al. (2021, section III.D) use with their fits.
+  (the same \f$ Z \f$), without a floor.
 - `imp_pressure`: the ion pressure and its gradient count \f$ n_{imp} = (n_e - n_i)^2/(Z_{eff} n_e - n_i) \f$ at
   \f$ T_i \f$, the density of the one impurity species that, with main ions of charge 1, gives quasineutrality and
   \f$ Z_{eff} \f$. The collisionalities and Coulomb logarithms keep the main-ion density. `eval_bootstrap` also takes

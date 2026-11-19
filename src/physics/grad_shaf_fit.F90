@@ -110,6 +110,26 @@ CONTAINS
   PROCEDURE :: setup_comp => fit_mse_setup_comp
 END TYPE mse_constraint
 !---------------------------------------------------------------------------------
+!> Finite-length magnetic field probe constraint
+!!
+!! The field component along the normal `v` is averaged over `npts` points, the midpoints of `npts` equal
+!! parts of a straight segment of length |`length`| centered on the probe location. The segment lies along
+!! the poloidal (R, Z) projection of `v` for `length` > 0 and perpendicular to it (that projection rotated
+!! by +90 degrees in the R-Z plane) for `length` < 0.
+!---------------------------------------------------------------------------------
+TYPE, EXTENDS(field_constraint) :: flfield_constraint
+  INTEGER(i4) :: npts = 1 !< Number of averaging points
+  REAL(r8) :: length = 0.d0 !< Signed probe length [m]
+  INTEGER(i4), POINTER, DIMENSION(:) :: cells => NULL() !< Cells containing the averaging points
+  REAL(r8), POINTER, DIMENSION(:,:) :: fs => NULL() !< Logical coordinates of the averaging points
+  REAL(r8), POINTER, DIMENSION(:,:) :: pts => NULL() !< Averaging points (R, Z, 0)
+CONTAINS
+  !> Evaluate constraint value
+  PROCEDURE :: eval => fit_flfield_eval
+  !> Destructor
+  PROCEDURE :: destroy => fit_flfield_destroy
+END TYPE flfield_constraint
+!---------------------------------------------------------------------------------
 !> Flux loop constraint
 !---------------------------------------------------------------------------------
 TYPE, EXTENDS(fit_constraint) :: flux_constraint
@@ -1120,6 +1140,7 @@ TYPE(press_constraint), POINTER :: press_con
 ! TYPE(injlam_constraint), POINTER :: injlam_con
 TYPE(q_constraint), POINTER :: q_con
 TYPE(mse_constraint), POINTER :: mse_con
+TYPE(flfield_constraint), POINTER :: flfield_con
 !---
 INTEGER(4) :: i,j,k,n,m,npsi,io_unit,ncons,neddy
 REAL(8) :: rtmp(2)
@@ -1222,6 +1243,18 @@ DO i=1,n
       IF((mse_con%quantity<1).OR.(mse_con%quantity>2))CALL oft_abort('Invalid MSE quantity.','fit_load',__FILE__)
       mse_con%r(1:2)=rtmp
       cons(j)%con=>mse_con
+    CASE(14)
+      ALLOCATE(flfield_con)
+      READ(io_unit,*,END=300)rtmp,flfield_con%phi
+      READ(io_unit,*,END=300)flfield_con%v
+      READ(io_unit,*,END=300)flfield_con%length,flfield_con%npts
+      READ(io_unit,*,END=300)flfield_con%val,flfield_con%wt
+      IF(flfield_con%npts<1)CALL oft_abort('Invalid number of probe averaging points.','fit_load',__FILE__)
+      IF((flfield_con%length/=0.d0).AND.(ABS(flfield_con%v(1))+ABS(flfield_con%v(3))<=0.d0)) &
+        CALL oft_abort('Finite-length probe requires a poloidal normal component.','fit_load',__FILE__)
+      flfield_con%r(1:2)=rtmp
+      neddy=neddy+1
+      cons(j)%con=>flfield_con
     CASE DEFAULT
       CALL oft_abort('Invalid constraint type.','fit_load',__FILE__)
   END SELECT
@@ -1532,6 +1565,56 @@ SUBROUTINE fit_mse_setup_comp(self)
 CLASS(mse_constraint), INTENT(inout) :: self !< Constraint
 self%ncomp=0
 END SUBROUTINE fit_mse_setup_comp
+!---------------------------------------------------------------------------------
+!> Evaluate finite-length probe constraint: mean of \f$ \mathbf{B} \cdot \mathbf{v} \f$ over the averaging points
+!---------------------------------------------------------------------------------
+FUNCTION fit_flfield_eval(self,gs) RESULT(val)
+CLASS(flfield_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+REAL(r8) :: val !< Modeled signal
+INTEGER(i4) :: k
+REAL(r8) :: btmp(3)
+IF(.NOT.ASSOCIATED(self%cells))CALL fit_flfield_setup(self,gs)
+val=0.d0
+DO k=1,self%npts
+  CALL fit_bvec_eval(gs,self%cells(k),self%fs(:,k),self%pts(:,k),btmp)
+  val=val+DOT_PRODUCT(btmp,self%v)
+END DO
+val=val/REAL(self%npts,r8)
+END FUNCTION fit_flfield_eval
+!---------------------------------------------------------------------------------
+!> Place and locate the averaging points of a finite-length probe (off-mesh points are projected)
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_flfield_setup(self,gs)
+CLASS(flfield_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+INTEGER(i4) :: k
+REAL(r8) :: t(2),tnorm,s
+ALLOCATE(self%cells(self%npts),self%fs(3,self%npts),self%pts(3,self%npts))
+t=0.d0
+tnorm=SQRT(self%v(1)**2+self%v(3)**2)
+IF(tnorm>0.d0)THEN
+  IF(self%length>=0.d0)THEN
+    t=[self%v(1),self%v(3)]/tnorm
+  ELSE
+    t=[-self%v(3),self%v(1)]/tnorm
+  END IF
+END IF
+DO k=1,self%npts
+  s=(REAL(k-1,r8)-0.5d0*REAL(self%npts-1,r8))*ABS(self%length)/REAL(self%npts,r8)
+  self%pts(:,k)=[self%r(1)+s*t(1),self%r(2)+s*t(2),0.d0]
+  self%cells(k)=0
+  CALL fit_locate_point(gs%device%mesh,self%pts(:,k),self%cells(k),self%fs(:,k))
+END DO
+END SUBROUTINE fit_flfield_setup
+!---------------------------------------------------------------------------------
+!> Destroy finite-length probe constraint
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_flfield_destroy(self)
+CLASS(flfield_constraint), INTENT(inout) :: self !< Constraint
+IF(ASSOCIATED(self%cells))DEALLOCATE(self%cells,self%fs,self%pts)
+CALL fit_destroy(self)
+END SUBROUTINE fit_flfield_destroy
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------

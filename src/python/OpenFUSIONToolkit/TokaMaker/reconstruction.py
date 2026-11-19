@@ -54,6 +54,7 @@ q_con_id = 10
 saddle_con_id = 11
 coil_current_con_id = 12
 MSE_con_id = 13
+finite_Mirnov_con_id = 14
 
 ## @cond
 def _check_finite(name, value, shape=None):
@@ -87,8 +88,17 @@ def _check_error(err):
 
 
 class Mirnov_con:
-    '''! TokaMaker equilibrium reconstruction Mirnov sensor constraint'''
-    def __init__(self, loc=None, phi=0., norm=None, val=None, err=None):
+    r'''! TokaMaker equilibrium reconstruction Mirnov sensor constraint
+
+    The modeled signal is \f$ \mathbf{B} \cdot \mathbf{n} \f$ at the sensor location (point probe, the default), or its
+    mean over `n_avg` points for a finite-length probe: the points are the midpoints of `n_avg` equal parts of a
+    straight segment of length \f$ |L| \f$ centered on the sensor, at offsets
+    \f$ (k - (n_{avg}-1)/2) |L| / n_{avg} \f$, \f$ k = 0 \ldots n_{avg}-1 \f$, along the unit vector
+    \f$ (n_R, n_Z)/|(n_R, n_Z)| \f$ for \f$ L > 0 \f$ and along \f$ (-n_Z, n_R)/|(n_R, n_Z)| \f$ (that vector
+    rotated by +90 degrees in the R-Z plane) for \f$ L < 0 \f$. This is the convention of the EFIT probe length
+    `SMP2` (\f$ L < 0 \f$ for probes whose segment is perpendicular to the measured direction).
+    '''
+    def __init__(self, loc=None, phi=0., norm=None, val=None, err=None, length=None, n_avg=None):
         r'''! Create Mirnov sensor constraint
 
         @param loc Location of Mirnov in R-Z plane [2]
@@ -96,25 +106,52 @@ class Mirnov_con:
         @param norm Unit normal \f$ (R,\phi,Z) \f$ [3]
         @param val Value of constraint
         @param err Error in constraint
+        @param length Signed probe length \f$ L \f$ [m] (`None` for a point probe; see class description)
+        @param n_avg Number of averaging points of a finite-length probe (required with `length`)
         '''
         if norm is not None and numpy.shape(norm) != (3,):
             raise ValueError("Mirnov normal must have three components (R, phi, Z)")
+        if (length is None) != (n_avg is None):
+            raise ValueError("Finite-length Mirnov sensors need both `length` and `n_avg`")
+        if length is not None:
+            length = float(_check_finite('Mirnov length', length, ()))
+            if isinstance(n_avg, (bool, numpy.bool_)) or (not isinstance(n_avg, (int, numpy.integer))) or (n_avg < 1):
+                raise ValueError("Mirnov `n_avg` must be an integer >= 1")
+            n_avg = int(n_avg)
+            if norm is not None:
+                norm_chk = _check_finite('Mirnov normal', norm, (3,))
+                if (length != 0.0) and (norm_chk[0] == 0.0) and (norm_chk[2] == 0.0):
+                    raise ValueError("Finite-length Mirnov sensors need a nonzero poloidal (R, Z) normal component")
         self.loc = loc
         self.phi = phi
         self.norm = norm
         self.val = val
         self.err = err
+        ## Signed probe length [m] (`None` for a point probe)
+        self.length = length
+        ## Number of averaging points of a finite-length probe
+        self.n_avg = n_avg
 
-    def read(self, file):
+    def read(self, file, finite_length=False):
         '''! Read Mirnov constraint from file
 
         @param file Open file object containing constraint, must be positioned at start of constraint
+        @param finite_length Read a finite-length probe record (type 14) instead of a point probe record (type 1)
         '''
         values = file.readline().split()
         self.loc = (float(values[0]), float(values[1]))
         self.phi = float(values[2])
         values = file.readline().split()
         self.norm = (float(values[0]), float(values[1]), float(values[2]))
+        if finite_length:
+            values = file.readline().split()
+            self.length = float(values[0])
+            self.n_avg = int(values[1])
+            if self.n_avg < 1:
+                raise ValueError("Invalid value in file: Mirnov `n_avg` must be >= 1")
+        else:
+            self.length = None
+            self.n_avg = None
         values = file.readline().split()
         self.val = float(values[0])
         self.err = 1./float(values[1])
@@ -124,9 +161,14 @@ class Mirnov_con:
 
         @param file Open file object for saving constraints
         '''
-        file.write('{0}\n'.format(Mirnov_con_id))
+        if self.length is None:
+            file.write('{0}\n'.format(Mirnov_con_id))
+        else:
+            file.write('{0}\n'.format(finite_Mirnov_con_id))
         file.write(' {0:E} {1:E} {2:E}\n'.format(self.loc[0], self.loc[1], self.phi))
         file.write(' {0:E} {1:E} {2:E}\n'.format(self.norm[0], self.norm[1], self.norm[2]))
+        if self.length is not None:
+            file.write(' {0:E} {1:d}\n'.format(self.length, self.n_avg))
         file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
 
 
@@ -472,7 +514,8 @@ con_map = {
     q_con_id: q_con,
     saddle_con_id: saddle_con,
     coil_current_con_id: coil_current_con,
-    MSE_con_id: MSE_con
+    MSE_con_id: MSE_con,
+    finite_Mirnov_con_id: Mirnov_con
 }
 
 
@@ -662,15 +705,18 @@ class reconstruction():
         '''
         self._flux_loops.append(fluxLoop_con(loc=loc, val=val, err=err))
 
-    def add_Mirnov(self,loc,norm,val,err):
+    def add_Mirnov(self,loc,norm,val,err,length=None,n_avg=None):
         r'''! Add Mirnov sensor constraint
 
         @param loc Location of Mirnov in R-Z plane [2]
         @param norm Unit normal \f$ (R,\phi,Z) \f$ [3]; use a zero toroidal component for a poloidal probe
         @param val Value of Mirnov constraint
         @param err Error in constraint
+        @param length Signed probe length [m] for a finite-length probe (`None`, the default, for a point probe; the
+        segment geometry is described in \ref OpenFUSIONToolkit.TokaMaker.reconstruction.Mirnov_con "Mirnov_con")
+        @param n_avg Number of averaging points of a finite-length probe (required with `length`)
         '''
-        self._mirnovs.append(Mirnov_con(loc=loc, norm=norm, val=val, err=err))
+        self._mirnovs.append(Mirnov_con(loc=loc, norm=norm, val=val, err=err, length=length, n_avg=n_avg))
 
     def add_saddle(self,p1,p2,width,val,err):
         '''! Add saddle loop constraint
@@ -756,14 +802,17 @@ class reconstruction():
                 con_type = int(fid.readline())
                 new_con_class = con_map[con_type]
                 new_con = new_con_class()
-                new_con.read(fid)
+                if con_type == finite_Mirnov_con_id:
+                    new_con.read(fid, finite_length=True)
+                else:
+                    new_con.read(fid)
                 if con_type == Ip_con_id:
                     self._Ip_con = new_con
                 elif con_type == dFlux_con_id:
                     self._Dflux_con = new_con
                 elif con_type == fluxLoop_con_id:
                     self._flux_loops.append(new_con)
-                elif con_type == Mirnov_con_id:
+                elif con_type in (Mirnov_con_id, finite_Mirnov_con_id):
                     self._mirnovs.append(new_con)
                 elif con_type == saddle_con_id:
                     self._saddles.append(new_con)

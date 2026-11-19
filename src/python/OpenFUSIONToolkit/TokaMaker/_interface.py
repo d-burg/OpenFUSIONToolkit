@@ -48,6 +48,7 @@ class tokamaker_boot_ops_struct(c_struct):
      - `saw_rule` Reset rule: 1 fuse (axis to the sawtooth radius, FUSE's saw_crash!), 2 local (each dip, two-sided; default)
      - `ln_lambda_model` Coulomb logarithms: 1 NRL (default), 2 Sauter 1999
      - `imp_pressure` Count the impurity in the ion pressure of the bootstrap current (default False)
+     - `bs_model` Bootstrap coefficients: 1 Redl 2021 (default), 2 Sauter 1999 with its 2002 erratum
     '''
     _fields_ = [('isolate_edge_jbs', c_bool),
                 ('scale_jbs', c_double),
@@ -63,7 +64,8 @@ class tokamaker_boot_ops_struct(c_struct):
                 ('saw_ramp', c_double),
                 ('saw_rule', c_int),
                 ('ln_lambda_model', c_int),
-                ('imp_pressure', c_bool)]
+                ('imp_pressure', c_bool),
+                ('bs_model', c_int)]
 
 # tokamaker_alloc(tMaker_ptr,mesh_ptr,error_str)
 tokamaker_alloc = ctypes_subroutine(oftpy_lib.tokamaker_alloc,
@@ -136,9 +138,9 @@ tokamaker_saw_reset_1d = ctypes_subroutine(oftpy_lib.tokamaker_saw_reset_1d,
      ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1),
      ctypes_numpy_array(numpy.float64,1), c_int_ptr])
 
-# tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model,imp_mode,profs,error_str)
+# tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model,imp_mode,bs_model,profs,error_str)
 tokamaker_eval_bootstrap = ctypes_subroutine(oftpy_lib.tokamaker_eval_bootstrap,
-    [c_void_p, c_int] + [ctypes_numpy_array(numpy.float64,1)]*7 + [c_int, c_int, ctypes_numpy_array(numpy.float64,2), c_char_p])
+    [c_void_p, c_int] + [ctypes_numpy_array(numpy.float64,1)]*7 + [c_int, c_int, c_int, ctypes_numpy_array(numpy.float64,2), c_char_p])
 
 # tokamaker_init_psi(tMaker_ptr,r0,z0,a,kappa,delta,rhs_source,error_str)
 tokamaker_init_psi = ctypes_subroutine(oftpy_lib.tokamaker_init_psi,

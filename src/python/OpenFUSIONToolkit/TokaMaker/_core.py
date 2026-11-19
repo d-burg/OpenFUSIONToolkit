@@ -138,18 +138,21 @@ _BOOT_OPS_DEFAULTS = {
     'saw_rule': 2,
     'ln_lambda_model': 1,
     'imp_pressure': False,
+    'bs_model': 1,
 }
 
 
-def _check_boot_models(ln_lambda_model, imp_pressure):
+def _check_boot_models(ln_lambda_model, imp_pressure, bs_model):
     '''! Check the bootstrap model options (not converted: 2.7 or the string "False" are rejected)
 
     @param ln_lambda_model Coulomb logarithms, the integer 1 or 2
     @param imp_pressure Count the impurity in the ion pressure, a bool
+    @param bs_model Bootstrap coefficients, the integer 1 or 2
     '''
-    if isinstance(ln_lambda_model, (bool, numpy.bool_)) or not isinstance(ln_lambda_model, (int, numpy.integer)) \
-            or ln_lambda_model not in (1, 2):
-        raise ValueError("ln_lambda_model must be the integer 1 (NRL) or 2 (Sauter 1999)")
+    for name, val, models in (('ln_lambda_model', ln_lambda_model, '1 (NRL) or 2 (Sauter 1999)'),
+                              ('bs_model', bs_model, '1 (Redl 2021) or 2 (Sauter 1999)')):
+        if isinstance(val, (bool, numpy.bool_)) or not isinstance(val, (int, numpy.integer)) or val not in (1, 2):
+            raise ValueError(f"{name} must be the integer {models}")
     if not isinstance(imp_pressure, (bool, numpy.bool_)):
         raise ValueError("imp_pressure must be a bool")
 
@@ -1115,7 +1118,7 @@ class TokaMaker():
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
-                     ln_lambda_model=None, imp_pressure=None):
+                     ln_lambda_model=None, imp_pressure=None, bs_model=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update
 
         See @ref TokaMaker.TokaMaker_equilibrium.set_boot_ops "set_boot_ops"
@@ -1126,7 +1129,7 @@ class TokaMaker():
                                                diagnose_bs,
                                                taper_edge_jphi, taper_edge_psi0, taper_edge_shape,
                                                saw_q_s, saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule,
-                                               ln_lambda_model, imp_pressure)
+                                               ln_lambda_model, imp_pressure, bs_model)
 
     def get_boot_profs(self):
         r'''! Get the current profiles of the last G-S solve with a `jphi-split-bootstrap` current profile
@@ -2638,6 +2641,7 @@ class TokaMaker():
         @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule See ``set_boot_ops()``
         @param ln_lambda_model, imp_pressure Coulomb logarithms and impurity ion pressure of the bootstrap
           current, see ``set_boot_ops()`` (defaults: 1 = NRL, False)
+        @param bs_model Bootstrap coefficients, see ``set_boot_ops()`` (default: 1 = Redl 2021)
 
         @result Dictionary with 1-D numpy array values (A/m^2 unless noted). All current densities, inputs
           included, are TokaMaker \f$j_\phi = \langle j_\phi \rangle = \langle R \rangle P' + \langle 1/R \rangle FF'/\mu_0\f$
@@ -2801,14 +2805,16 @@ class TokaMaker():
         # Extract bootstrap profiles
         return self.get_boot_profs()
 
-    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None):
+    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None,
+                       bs_model=None):
         r'''! Evaluate the bootstrap current of @ref solve_bootstrap on the current equilibrium, without solving
 
         See @ref TokaMaker.TokaMaker_equilibrium.eval_bootstrap "eval_bootstrap"
         '''
         if self._tMaker_equil is None:
             raise ValueError("Equilibrium object is `None`")
-        return self._tMaker_equil.eval_bootstrap(psi, te, ti, ne, ni, Zeff, nimp, ln_lambda_model, imp_pressure)
+        return self._tMaker_equil.eval_bootstrap(psi, te, ti, ne, ni, Zeff, nimp, ln_lambda_model, imp_pressure,
+                                                 bs_model)
 
 class TokaMaker_equilibrium():
     '''! TokaMaker G-S equilibrium class'''
@@ -3287,7 +3293,7 @@ class TokaMaker_equilibrium():
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
                      saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
-                     ln_lambda_model=None, imp_pressure=None):
+                     ln_lambda_model=None, imp_pressure=None, bs_model=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update.
 
         Call after setting a `jphi-split-bootstrap`-type ffp_prof profile, and before mygs.solve().
@@ -3314,10 +3320,14 @@ class TokaMaker_equilibrium():
           \f$n_{imp} = (n_e - n_i)^2/(Z_{eff} n_e - n_i)\f$, the one impurity species that with main ions of charge 1
           gives quasineutrality and \f$Z_{eff}\f$ (zero where \f$n_i \geq n_e\f$ or \f$Z_{eff} n_e \leq n_i\f$).
           (Internal default: False)
+        @param bs_model Bootstrap coefficients \f$L_{31}, L_{32}, L_{34}, \alpha\f$ in the same `jboot1` form: 1 = Redl
+          et al. 2021 (\f$L_{34} = L_{31}\f$); 2 = Sauter et al. 1999 with the sign of the 2002 erratum (see
+          `bootstrap.redl_bootstrap`, `coefficient_model`). (Internal default: 1)
         '''
         ops = _BOOT_OPS_DEFAULTS if self._boot_ops is None else self._boot_ops
         _check_boot_models(ops['ln_lambda_model'] if ln_lambda_model is None else ln_lambda_model,
-                           ops['imp_pressure'] if imp_pressure is None else imp_pressure)
+                           ops['imp_pressure'] if imp_pressure is None else imp_pressure,
+                           ops['bs_model'] if bs_model is None else bs_model)
         if self._boot_ops is None:
             self._boot_ops = dict(_BOOT_OPS_DEFAULTS)
         for key, val in (('isolate_edge_jbs', isolate_edge_jbs), ('scale_jbs', scale_jbs), ('djbs_tol', djbs_tol),
@@ -3325,7 +3335,8 @@ class TokaMaker_equilibrium():
                          ('taper_edge_psi0', taper_edge_psi0), ('taper_edge_shape', taper_edge_shape),
                          ('saw_q_s', saw_q_s), ('saw_dq', saw_dq), ('saw_tol', saw_tol), ('saw_relax', saw_relax),
                          ('saw_ramp', saw_ramp), ('saw_rule', saw_rule),
-                         ('ln_lambda_model', ln_lambda_model), ('imp_pressure', imp_pressure)):
+                         ('ln_lambda_model', ln_lambda_model), ('imp_pressure', imp_pressure),
+                         ('bs_model', bs_model)):
             if val is not None:
                 self._boot_ops[key] = type(_BOOT_OPS_DEFAULTS[key])(val)
         if self._boot_ops['saw_q_s'] < 0.0 or self._boot_ops['saw_dq'] <= 0.0 or not (0.0 < self._boot_ops['saw_relax'] <= 1.0) \
@@ -3378,12 +3389,14 @@ class TokaMaker_equilibrium():
                     result[key] = result[key][::-1].copy()
         return result if result else None
 
-    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None):
+    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None,
+                       bs_model=None):
         r'''! Evaluate the bootstrap current of the internal solver on the current equilibrium, without solving
 
         This is the evaluation that @ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap" makes at each
-        nonlinear iteration (the same code; Redl et al., Phys. Plasmas 28, 022502 (2021), see
-        doc_tokamaker_current_conventions), with the geometry of the current equilibrium and its \f$P'\f$
+        nonlinear iteration (the same code; Redl et al., Phys. Plasmas 28, 022502 (2021), or Sauter et al.,
+        Phys. Plasmas 6, 2834 (1999), see doc_tokamaker_current_conventions), with the geometry of the current
+        equilibrium and its \f$P'\f$
         for the pressure-driven part. Gradients of the kinetic profiles are taken on `psi`, leaving out a
         point on the LCFS, where the values are extrapolated (as on the axis). Neither the equilibrium nor
         the bootstrap options and profiles of the last solve are changed.
@@ -3407,6 +3420,8 @@ class TokaMaker_equilibrium():
           solve, else 1)
         @param imp_pressure Count the impurity density of @ref set_boot_ops in the ion pressure (default: the value
           set for the solve, else False)
+        @param bs_model Bootstrap coefficients, 1 (Redl 2021) or 2 (Sauter 1999) (see @ref set_boot_ops; default:
+          the value set for the solve, else 1)
         @result Dictionary of 1-D numpy arrays on `psi`: `'psi_n'`; `'jdotB_bs_raw'`, `'jphi_bs_raw'` and
           `'jphi_pd_raw'` as in @ref get_boot_profs; `'f_t'` (trapped fraction), `'nu_e_star'` and `'nu_i_star'`
           (collisionalities), which are NaN on the LCFS (not evaluated) and, on an axis node, their limits
@@ -3422,7 +3437,8 @@ class TokaMaker_equilibrium():
         ops = _BOOT_OPS_DEFAULTS if self._boot_ops is None else self._boot_ops
         ln_lambda_model = ops['ln_lambda_model'] if ln_lambda_model is None else ln_lambda_model
         imp_pressure = ops['imp_pressure'] if imp_pressure is None else imp_pressure
-        _check_boot_models(ln_lambda_model, imp_pressure)
+        bs_model = ops['bs_model'] if bs_model is None else bs_model
+        _check_boot_models(ln_lambda_model, imp_pressure, bs_model)
         imp_mode = 2 if nimp is not None else (1 if imp_pressure else 0)
         # Fortran nodes: OFT convention (0 = LCFS), increasing
         flip = slice(None, None, -1) if self.psi_convention == 0 else slice(None)
@@ -3451,7 +3467,8 @@ class TokaMaker_equilibrium():
         profs = [profs[name] for name in ('te', 'ti', 'ne', 'ni', 'Zeff', 'nimp')]
         out = numpy.zeros((6, n), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
-        tokamaker_eval_bootstrap(self.c_ptr, n, psi_c, *profs, int(ln_lambda_model), imp_mode, out, error_string)
+        tokamaker_eval_bootstrap(self.c_ptr, n, psi_c, *profs, int(ln_lambda_model), imp_mode, int(bs_model), out,
+                                 error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
         if psi_c[0] == 0.0:

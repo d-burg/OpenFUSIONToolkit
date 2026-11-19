@@ -604,6 +604,43 @@ def calculate_ln_lambda(Te, Ti, ne, ni, Zeff=1.0,
     return ln_lambda_e, ln_lambda_ii
 
 
+def sauter_coefficients(fT, nu_e_star, nu_i_star, Zeff):
+    r'''! Bootstrap coefficients of Sauter et al., Phys. Plasmas 6, 2834 (1999), eqs. 14-17, with the Erratum,
+    Phys. Plasmas 9, 5140 (2002) (+ sign of the \f$0.315\,\nu_{i*}^2 f_t^6\f$ term of \f$\alpha\f$, eq. 17a)
+
+    \f$Z = Z_{eff}\f$ in every coefficient. Used by @ref redl_bootstrap with `coefficient_model='sauter'`.
+
+    @param fT Trapped particle fraction \f$f_t\f$
+    @param nu_e_star Electron collisionality \f$\nu_{e*}\f$
+    @param nu_i_star Ion collisionality \f$\nu_{i*}\f$
+    @param Zeff Effective charge \f$Z_{eff}\f$
+    @result Dictionary of \f$L_{31}\f$ (eq. 14), \f$L_{32}\f$ (eq. 15) and its parts `'F32_ee'` and `'F32_ei'`,
+    \f$L_{34}\f$ (eq. 16), \f$\alpha\f$ and \f$\alpha_0\f$ (eq. 17)
+    '''
+    sq_e = numpy.sqrt(nu_e_star)
+
+    def F31(t):  # eq. 14a
+        return ((1.0 + 1.4/(Zeff + 1.0))*t - 1.9/(Zeff + 1.0)*t**2
+                + 0.3/(Zeff + 1.0)*t**3 + 0.2/(Zeff + 1.0)*t**4)
+    # Effective trapped fractions of eqs. 14b, 16b, 15d and 15e
+    X31 = fT/(1.0 + (1.0 - 0.1*fT)*sq_e + 0.5*(1.0 - fT)*nu_e_star/Zeff)
+    X34 = fT/(1.0 + (1.0 - 0.1*fT)*sq_e + 0.5*(1.0 - 0.5*fT)*nu_e_star/Zeff)
+    X = fT/(1.0 + 0.26*(1.0 - fT)*sq_e + 0.18*(1.0 - 0.37*fT)*nu_e_star/numpy.sqrt(Zeff))
+    Y = fT/(1.0 + (1.0 + 0.6*fT)*sq_e + 0.85*(1.0 - 0.37*fT)*nu_e_star*(1.0 + Zeff))
+    F32_ee = ((0.05 + 0.62*Zeff)/(Zeff*(1.0 + 0.44*Zeff))*(X - X**4)
+              + (X**2 - X**4 - 1.2*(X**3 - X**4))/(1.0 + 0.22*Zeff)
+              + 1.2/(1.0 + 0.5*Zeff)*X**4)
+    F32_ei = (-(0.56 + 1.93*Zeff)/(Zeff*(1.0 + 0.44*Zeff))*(Y - Y**4)
+              + 4.95/(1.0 + 2.48*Zeff)*(Y**2 - Y**4 - 0.55*(Y**3 - Y**4))
+              - 1.2/(1.0 + 0.5*Zeff)*Y**4)
+    alpha0 = -1.17*(1.0 - fT)/(1.0 - 0.22*fT - 0.19*fT**2)
+    w = nu_i_star**2*fT**6
+    alpha = (((alpha0 + 0.25*(1.0 - fT**2)*numpy.sqrt(nu_i_star))/(1.0 + 0.5*numpy.sqrt(nu_i_star)) + 0.315*w)
+             / (1.0 + 0.15*w))
+    return {'L31': F31(X31), 'L32': F32_ee + F32_ei, 'L34': F31(X34), 'alpha': alpha, 'alpha0': alpha0,
+            'F32_ee': F32_ee, 'F32_ei': F32_ei}
+
+
 def redl_bootstrap(
     psi_N=None,
     Te=None, Ti=None,
@@ -623,14 +660,18 @@ def redl_bootstrap(
     Zeff_override=None,          # <- add this back
     nu_e_star_override=None,      # <- NEW
     nu_i_star_override=None,      # <- NEW
+    coefficient_model='redl',
 ):
-    r'''! Bootstrap current via Redl et al., Phys. Plasmas 28, 022502 (2021)
+    r'''! Bootstrap current via Redl et al., Phys. Plasmas 28, 022502 (2021), or Sauter et al., Phys. Plasmas 6,
+    2834 (1999) with its Erratum, Phys. Plasmas 9, 5140 (2002)
 
     The internal solver (@ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap",
     @ref TokaMaker.TokaMaker.eval_bootstrap "eval_bootstrap") evaluates this formula with
     `formula_form='jboot1'`, `use_legacy_L34=False`, `use_sign_q=False`, `ion_collisionality_model='Zavg_Zeff'`,
     \f$|q|\f$, and the Coulomb logarithms of `calculate_ln_lambda(..., 'NRL', 'Zavg')`. The defaults here
     differ (`'jB'`, \f$Z_{eff}^4\f$, \f$\ln\Lambda = 17\f$), which changes the current by several percent.
+    The solver's `bs_model` 1 or 2 is `coefficient_model` 'redl' or 'sauter': the two differ only in the fits
+    of \f$L_{31}, L_{32}, L_{34}\f$ and \f$\alpha\f$ (@ref sauter_coefficients); collisionalities and assembly are shared.
 
     @param psi_N Normalized poloidal flux profile \f$\hat{\psi}\f$
     @param Te Electron temperature profile \f$T_e\f$ [eV]
@@ -652,7 +693,8 @@ def redl_bootstrap(
     @param dp_dpsi Derivative of total pressure w.r.t. \f$\psi\f$
     @param ln_lambda_e Electron Coulomb logarithm \f$\ln\Lambda_e\f$
     @param ln_lambda_ii Ion Coulomb logarithm \f$\ln\Lambda_{ii}\f$
-    @param use_legacy_L34 Use legacy L34 formula (see Redl Eq. 19)
+    @param use_legacy_L34 Use legacy L34 formula (see Redl Eq. 19; Redl fits only, not with 'sauter', whose
+    \f$L_{34}\f$ is Sauter eq. 16)
     @param use_sign_q Multiply by sign of \f$q\f$
     @param ion_collisionality_model Charge factor \f$Z^4\f$ of the ion collisionality: 'Zeff' (\f$Z_{eff}^4\f$),
     'Koh' (\f$Z_{eff}\f$), 'Zavg_Zeff' (\f$(n_e/n_i) Z_{eff}\f$, the internal solver's form) or 'unity' (1)
@@ -660,8 +702,13 @@ def redl_bootstrap(
     @param Zeff_override Override \f$Z_{eff}\f$ if set
     @param nu_e_star_override Override electron collisionality if set
     @param nu_i_star_override Override ion collisionality if set
-    @result Tuple (Redl \f$\langle j_{BS} \cdot B \rangle(\hat{\psi})\f$ [T A/m^2], coefficient dictionary)
+    @param coefficient_model Fits of \f$L_{31}, L_{32}, L_{34}, \alpha\f$: 'redl' (default) or 'sauter'
+    @result Tuple (\f$\langle j_{BS} \cdot B \rangle(\hat{\psi})\f$ [T A/m^2], coefficient dictionary)
     '''
+    if coefficient_model not in ('redl', 'sauter'):
+        raise ValueError("coefficient_model must be 'redl' or 'sauter'")
+    if use_legacy_L34 and coefficient_model == 'sauter':
+        raise ValueError("use_legacy_L34 is a Redl fit; it cannot be used with coefficient_model='sauter'")
 
     # Apply Zeff override if requested
     if Zeff_override is not None:
@@ -788,6 +835,11 @@ def redl_bootstrap(
          / (1 + 0.18 * numpy.sqrt(nu_i_star))
          - 0.002 * nu_i_star**2 * fT**6)
         / (1 + 0.004 * nu_i_star**2 * fT**6))
+
+    if coefficient_model == 'sauter':  # The Sauter 1999 fits replace the four Redl fits; the rest is shared
+        sc = sauter_coefficients(fT, nu_e_star, nu_i_star, Zeff)
+        L31, L32, L34, alpha, alpha0, F32_ee, F32_ei = (sc[k] for k in ('L31', 'L32', 'L34', 'alpha', 'alpha0',
+                                                                        'F32_ee', 'F32_ei'))
 
     # =====================================================================
     # 5. Assemble

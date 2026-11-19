@@ -108,19 +108,28 @@ not \f$ J_{TM} \f$.
 scaling and taper). Parts: `bs` (bootstrap, the field-aligned term of (A7)), `pd` (its pressure-driven \f$ p'G \f$
 term), `ind` (inductive), `fixed`, `saw`: `jphi_total` = `jphi_ind` + `jphi_bs` + `jphi_pd` + `jphi_fixed` +
 `jphi_saw`. The edge isolation and `scale_jbs` act on `bs` only. The Python solve (`use_python_solve=True`)
-returns the GS output as `jphi_total`. `jdotB_bs_raw` is the Redl \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$
+returns the GS output as `jphi_total`. `jdotB_bs_raw` is the bootstrap \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$
 behind `jphi_bs_raw`. Options use `jbs` (`scale_jbs`, `isolate_edge_jbs`, `taper_edge_jphi`, `djbs_tol`).
 
 ## Bootstrap model of the internal solver
-At each nonlinear iteration `solve_bootstrap` evaluates the Redl et al. (2021) fits in the `jboot1` form of
-Sauter et al. (1999) with \f$ L_{34} = L_{31} \f$ on the profile nodes (Fortran `bootstrap_eval`). The trapped fraction,
+At each nonlinear iteration `solve_bootstrap` evaluates the Redl et al. (2021) fits (or those of Sauter et al.
+(1999), `bs_model` below) in the `jboot1` form of Sauter et al. (1999) on the profile nodes (Fortran `bootstrap_eval`). The trapped fraction,
 \f$ q \f$, the inverse aspect ratio \f$ \epsilon = (R_{max}-R_{min})/(R_{max}+R_{min}) \f$ and the major radius
 \f$ (R_{max}+R_{min})/2 \f$ of each surface come from one contour pass (`sauter_fc`); the collisionalities use \f$ |q| \f$, and
 \f$ \nu_{i*} \f$ the charge factor \f$ Z^4 = (n_e/n_i) Z_{eff} \f$. The kinetic gradients are taken on the nodes without the
 LCFS, and the values on the LCFS (and on the axis) are extrapolated. `eval_bootstrap` runs the same code on the
 current equilibrium at given surfaces and kinetic profiles, without solving and without changing the equilibrium,
-and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$. Two options
+and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$. Three options
 (`set_boot_ops`, `solve_bootstrap`, `eval_bootstrap`) act on both:
+- `bs_model`: the fits of the four coefficients \f$ L_{31} \f$, \f$ L_{32} \f$, \f$ L_{34} \f$ and \f$ \alpha \f$; everything
+  else (collisionalities, Coulomb logarithms, geometry, the `jboot1` assembly, the conversion to \f$ j_\phi \f$) is
+  shared. 1 (default): Redl et al. (2021) eqs. 10-21 with \f$ L_{34} = L_{31} \f$. 2: Sauter et al. (1999) eqs.
+  14-17 with the sign of the 2002 erratum (\f$ +0.315\,\nu_{i*}^2 f_t^6 \f$ in \f$ \alpha \f$). Redl et al. fitted the same
+  forms to NEO drift-kinetic calculations and present them as the more accurate set, mainly at the finite
+  collisionality of the edge; Sauter et al. (1999) is the earlier set that many codes and published results use,
+  for comparison with them. In the banana regime the two \f$ L_{31} \f$ differ by up to about 0.08 (of at most 1);
+  at finite collisionality and \f$ Z_{eff} > 1 \f$ the fits differ more, most in \f$ \alpha \f$ (Sauter's has no
+  \f$ Z_{eff} \f$ dependence; as \f$ \nu_{i*} \to \infty \f$, \f$ \alpha \to 2.1 \f$ (Sauter) and \f$ -0.5 \f$ (Redl)).
 - `ln_lambda_model`: 1 (default) uses the NRL formulary electron logarithm and the ion logarithm of Sauter et al.
   (1999) eq. 18e with \f$ Z = \max(n_e/n_i, 1) \f$, both floored at 10; 2 uses Sauter et al. (1999) eqs. 18d and 18e
   (the same \f$ Z \f$), without a floor.
@@ -133,12 +142,14 @@ and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{
 `use_legacy_L34=False`, `use_sign_q=False`, `ion_collisionality_model='Zavg_Zeff'`, \f$ |q| \f$ and the logarithms of
 `calculate_ln_lambda(..., 'NRL', 'Zavg')` (or `'sauter'`, whose floor of 10 is rarely reached) it equals
 `eval_bootstrap` node by node to round-off, given the same geometry and gradients (`test_TokaMaker_bootstrap_eval.py`).
-Its own defaults differ (`'jB'`, \f$ Z_{eff}^4 \f$, \f$ \ln\Lambda = 17 \f$).
+Its own defaults differ (`'jB'`, \f$ Z_{eff}^4 \f$, \f$ \ln\Lambda = 17 \f$). Its `coefficient_model` (`'redl'`, `'sauter'`)
+is `bs_model` (1, 2), and `bootstrap.sauter_coefficients` returns the Sauter coefficients alone; `use_legacy_L34`
+is a variant of the Redl fits and is rejected with `'sauter'`.
 
 ## Where these are used
 - TokaMaker `jphi_bs_update` / `bootstrap_eval` (Fortran), `eval_bootstrap` and `solve_with_bootstrap(use_python_solve=True)`:
   the bootstrap enters `jphi_total` by (A7) with \f$ p'G \f$ (`boot_profs['jphi_pd_raw']`); `boot_profs['jdotB_bs_raw']`
-  holds the Redl \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$.
+  holds the \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$ of `bs_model`.
 - TokaMaker `jphi_update` / `jphi_bs_update` \f$ I_p \f$ normalisation, the \f$ \alpha \f$ root of
   `solve_with_bootstrap(use_python_solve=True)`, and `util.get_dIdA_from_jphi`: (A9c).
 
@@ -149,7 +160,9 @@ Its own defaults differ (`'jB'`, \f$ Z_{eff}^4 \f$, \f$ \ln\Lambda = 17 \f$).
   \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$; Pfirsch-Schlueter current with zero \f$ \langle \mathbf{J}\cdot\mathbf{B} \rangle \f$.
 - O. Sauter, C. Angioni and Y. R. Lin-Liu, Phys. Plasmas **6**, 2834 (1999); A. Redl et al.,
   Phys. Plasmas **28**, 022502 (2021): bootstrap current as \f$ \langle j_\parallel B \rangle \f$; collisionalities and
-  Coulomb logarithms (S99 eqs. 18b-18e).
+  Coulomb logarithms (S99 eqs. 18b-18e); coefficient fits (`bs_model` 2: S99 eqs. 14-17; 1: Redl eqs. 10-21).
+- O. Sauter, C. Angioni and Y. R. Lin-Liu, Phys. Plasmas **9**, 5140 (2002): erratum to S99 (sign of the
+  \f$ 0.315\,\nu_{i*}^2 f_t^6 \f$ term of \f$ \alpha \f$, eq. 17a).
 - J. D. Huba, *NRL Plasma Formulary* (Naval Research Laboratory): electron Coulomb logarithm (`ln_lambda_model` 1).
 - O. Sauter and S. Yu. Medvedev, Comput. Phys. Commun. **184**, 293 (2013): COCOS (IMAS signs and \f$ 2\pi \f$).
 - IMAS.jl `src/physics/currents.jl`, `JparB_2_JtoR`:

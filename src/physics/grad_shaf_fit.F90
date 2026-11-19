@@ -35,8 +35,8 @@ PRIVATE
 !---------------------------------------------------------------------------------
 TYPE :: fit_constraint
   INTEGER(4) :: ncomp = 0 !< Number of non-axisymmetric compensations
-  INTEGER(i4) :: nproj = 0 !< Number of evaluation points moved onto the mesh boundary (off-mesh points)
-  REAL(r8) :: proj_dist = 0.d0 !< Largest distance an evaluation point was moved [m]
+  INTEGER(4) :: nproj = 0 !< Number of evaluation points moved onto the mesh boundary (off-mesh points)
+  REAL(8) :: proj_dist = 0.d0 !< Largest distance an evaluation point was moved [m]
   REAL(8) :: wt = 1.d0 !< Constraint weight
   REAL(8) :: val = 0.d0 !< Constraint value
   REAL(8), POINTER, DIMENSION(:) :: nax_corr => NULL() !< Non-axisymmetric compensations
@@ -322,12 +322,12 @@ END SUBROUTINE fit_gs_error
 SUBROUTINE fit_gs_locate(gs,constraints,loc_mat)
 TYPE(gs_equil), TARGET, INTENT(inout) :: gs !< Equilibrium
 TYPE(fit_constraint_ptr), POINTER, DIMENSION(:), INTENT(in) :: constraints !< Constraints
-REAL(r8), INTENT(inout) :: loc_mat(:,:) !< Per constraint: number of moved points, largest distance moved [m] [2,ncons]
-INTEGER(i4) :: i
+REAL(8), INTENT(inout) :: loc_mat(:,:) !< Per constraint: number of moved points, largest distance moved [m] [2,ncons]
+INTEGER(4) :: i
 gs_active=>gs
 DO i=1,SIZE(constraints)
   CALL constraints(i)%con%locate(gs)
-  loc_mat(1,i)=REAL(constraints(i)%con%nproj,r8)
+  loc_mat(1,i)=REAL(constraints(i)%con%nproj,8)
   loc_mat(2,i)=constraints(i)%con%proj_dist
 END DO
 END SUBROUTINE fit_gs_locate
@@ -1539,8 +1539,8 @@ CLASS(oft_bmesh), INTENT(in) :: smesh !< Mesh
 REAL(8), INTENT(inout) :: r(3) !< Location of the point (R, Z, 0); replaced by the boundary node if projected
 INTEGER(4), INTENT(inout) :: cell !< Cell containing the point (0 on input)
 REAL(8), INTENT(out) :: f(3) !< Logical coordinates of the point in `cell`
-INTEGER(i4), INTENT(inout) :: nproj !< Number of points moved onto the boundary
-REAL(r8), INTENT(inout) :: proj_dist !< Largest distance a point was moved [m]
+INTEGER(4), INTENT(inout) :: nproj !< Number of points moved onto the boundary
+REAL(8), INTENT(inout) :: proj_dist !< Largest distance a point was moved [m]
 REAL(8) :: rmin,rdiff
 INTEGER(4) :: i,ip
 CALL bmesh_findcell(smesh,cell,r,f)

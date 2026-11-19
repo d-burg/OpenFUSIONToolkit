@@ -145,10 +145,10 @@ class Mirnov_con:
         @param phi Toroidal location [rad] (only meaningful with 3D fields)
         @param norm Unit normal \f$ (R,\phi,Z) \f$ [3]
         @param val Value of constraint
-        @param err Error in constraint
-        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
+        @param err Error in constraint (positive)
         @param length Signed probe length \f$ L \f$ [m] (`None` for a point probe; see class description)
         @param n_avg Number of averaging points of a finite-length probe (required with `length`)
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         if norm is not None and numpy.shape(norm) != (3,):
             raise ValueError("Mirnov normal must have three components (R, phi, Z)")
@@ -168,7 +168,7 @@ class Mirnov_con:
         self.phi = phi
         self.norm = norm
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
         ## Signed probe length [m] (`None` for a point probe)
@@ -228,7 +228,7 @@ class Ip_con:
         if val is not None and val <= 0.0:
             raise ValueError("Plasma current constraint must be positive")
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
 
@@ -270,7 +270,7 @@ class fluxLoop_con:
         '''
         self.loc = loc
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
 
@@ -305,7 +305,7 @@ class dFlux_con:
         @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
 
@@ -341,7 +341,7 @@ class Press_con:
             raise ValueError("Plasma pressure constraints must be positive")
         self.loc = loc
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
 
@@ -382,7 +382,7 @@ class q_con:
         '''
         self.type = type
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
         self.loc = loc
@@ -425,7 +425,7 @@ class saddle_con:
         self.pt2 = pt2
         self.width = width
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
 
@@ -472,7 +472,7 @@ class coil_current_con:
         '''
         self.ind = ind
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
 
@@ -795,6 +795,7 @@ class reconstruction():
         for name in use:
             if name not in targets:
                 raise KeyError(f"Used flag given for coil set '{name}' without a coil current target")
+            _check_use(use[name])
         self._coil_current_cons = []
         for name, coil_set in self._tMaker_obj.coil_sets.items():
             if name not in targets:

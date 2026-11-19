@@ -12,7 +12,7 @@
 !! @ingroup doxy_oft_physics
 !------------------------------------------------------------------------------
 MODULE oft_gs_fit
-USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_nan
+USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_nan, ieee_value, ieee_quiet_nan
 USE oft_base
 USE oft_io, ONLY: hdf5_read, oft_file_exist
 USE oft_mesh_type, ONLY: oft_bmesh, bmesh_findcell
@@ -92,6 +92,23 @@ CONTAINS
   !> Setup 3D error field compensation information
   PROCEDURE :: setup_comp => fit_field_setup_comp
 END TYPE field_constraint
+!---------------------------------------------------------------------------------
+!> Motional Stark effect (MSE) pitch angle constraint
+!!
+!! \f$ \tan \gamma = (c_0 B_Z + c_1 B_R + c_2 B_\phi + c_3 E_R) /
+!! (c_4 B_Z + c_5 B_R + c_6 B_\phi + c_7 E_R + c_8 E_Z) \f$ (IMAS coefficient order; `coefs(k+1)` holds
+!! \f$ c_k \f$), with the field evaluated as for \ref field_constraint
+!---------------------------------------------------------------------------------
+TYPE, EXTENDS(field_constraint) :: mse_constraint
+  INTEGER(4) :: quantity = 1 !< Measured quantity (1 -> \f$ \tan \gamma \f$, 2 -> \f$ \gamma \f$ [rad])
+  REAL(8) :: coefs(9) = 0.d0 !< Geometry coefficients \f$ c_0 \ldots c_8 \f$ (IMAS order)
+  REAL(8) :: efield(2) = 0.d0 !< Radial and vertical electric field \f$ (E_R, E_Z) \f$ [V/m]
+CONTAINS
+  !> Evaluate constraint value
+  PROCEDURE :: eval => fit_mse_eval
+  !> Setup 3D error field compensation information (none for MSE)
+  PROCEDURE :: setup_comp => fit_mse_setup_comp
+END TYPE mse_constraint
 !---------------------------------------------------------------------------------
 !> Flux loop constraint
 !---------------------------------------------------------------------------------
@@ -1102,6 +1119,7 @@ TYPE(dflux_constraint), POINTER :: dflux_con
 TYPE(press_constraint), POINTER :: press_con
 ! TYPE(injlam_constraint), POINTER :: injlam_con
 TYPE(q_constraint), POINTER :: q_con
+TYPE(mse_constraint), POINTER :: mse_con
 !---
 INTEGER(4) :: i,j,k,n,m,npsi,io_unit,ncons,neddy
 REAL(8) :: rtmp(2)
@@ -1194,6 +1212,16 @@ DO i=1,n
       READ(io_unit,*,END=300)coil_con%coil
       READ(io_unit,*,END=300)coil_con%val,coil_con%wt
       cons(j)%con=>coil_con
+    CASE(13)
+      ALLOCATE(mse_con)
+      READ(io_unit,*,END=300)rtmp,mse_con%phi
+      READ(io_unit,*,END=300)mse_con%coefs
+      READ(io_unit,*,END=300)mse_con%efield
+      READ(io_unit,*,END=300)mse_con%quantity
+      READ(io_unit,*,END=300)mse_con%val,mse_con%wt
+      IF((mse_con%quantity<1).OR.(mse_con%quantity>2))CALL oft_abort('Invalid MSE quantity.','fit_load',__FILE__)
+      mse_con%r(1:2)=rtmp
+      cons(j)%con=>mse_con
     CASE DEFAULT
       CALL oft_abort('Invalid constraint type.','fit_load',__FILE__)
   END SELECT
@@ -1415,50 +1443,99 @@ FUNCTION fit_field_eval(self,gs) RESULT(val)
 CLASS(field_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
+REAL(8) :: btmp(3)
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f)
+CALL fit_bvec_eval(gs,self%cell,self%f,self%r,btmp)
+!---
+val = DOT_PRODUCT(btmp,self%v)
+END FUNCTION fit_field_eval
+!---------------------------------------------------------------------------------
+!> Find the mesh cell containing a constraint point
+!!
+!! A point outside the mesh is moved to the nearest boundary node
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_locate_point(smesh,r,cell,f)
+CLASS(oft_bmesh), INTENT(in) :: smesh !< Mesh
+REAL(8), INTENT(inout) :: r(3) !< Location of the point (R, Z, 0); replaced by the boundary node if projected
+INTEGER(4), INTENT(inout) :: cell !< Cell containing the point (0 on input)
+REAL(8), INTENT(out) :: f(3) !< Logical coordinates of the point in `cell`
+REAL(8) :: rmin,rdiff
+INTEGER(4) :: i,ip
+CALL bmesh_findcell(smesh,cell,r,f)
+IF((MINVAL(f)<-1.d-6).OR.(MAXVAL(f)>1.d0+1.d-6))THEN
+  ip=0
+  rmin=1.d99
+  DO i=1,smesh%nbp
+    rdiff=SUM((r-smesh%r(:,smesh%lbp(i)))**2)
+    IF(rdiff<rmin)THEN
+      rmin=rdiff
+      ip=i
+    END IF
+  END DO
+  IF(oft_debug_print(1))WRITE(*,*)'Point projected',r,smesh%r(:,smesh%lbp(ip))
+  r=smesh%r(:,smesh%lbp(ip))
+  cell=0
+  CALL bmesh_findcell(smesh,cell,r,f)
+END IF
+END SUBROUTINE fit_locate_point
+!---------------------------------------------------------------------------------
+!> Evaluate the magnetic field \f$ (B_R, B_\phi, B_Z) \f$ at a point already located in the mesh
+!!
+!! The toroidal field uses \f$ F(\psi) \f$ at the point (no in-plasma test), as all field constraints do
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_bvec_eval(gs,cell,f,r,btmp)
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+INTEGER(4), INTENT(in) :: cell !< Cell containing the point
+REAL(8), INTENT(in) :: f(3) !< Logical coordinates of the point in `cell`
+REAL(8), INTENT(in) :: r(3) !< Location of the point (R, Z, 0)
+REAL(8), INTENT(out) :: btmp(3) !< Field \f$ (B_R, B_\phi, B_Z) \f$ [T]
 TYPE(oft_lag_brinterp) :: psi_eval
 TYPE(oft_lag_bginterp) :: psi_geval
-REAL(8) :: goptmp(3,3),v,psi(1),gpsi(3),rmin,rdiff,btmp(3)
-INTEGER(4) :: i,ip
-CLASS(oft_bmesh), POINTER :: smesh
-smesh=>gs%device%mesh
-IF(self%cell==0)THEN
-  call bmesh_findcell(smesh,self%cell,self%r,self%f)
-  IF((minval(self%f)<-1.d-6).OR.(maxval(self%f)>1.d0+1.d-6))THEN
-    ip=0
-    rmin=1.d99
-    DO i=1,smesh%nbp
-      rdiff=SUM((self%r-smesh%r(:,smesh%lbp(i)))**2)
-      IF(rdiff<rmin)THEN
-        rmin=rdiff
-        ip=i
-      END IF
-    END DO
-    IF(oft_debug_print(1))WRITE(*,*)'Point projected',self%r,smesh%r(:,smesh%lbp(ip))
-    self%r=smesh%r(:,smesh%lbp(ip))
-    self%cell=0
-    call bmesh_findcell(smesh,self%cell,self%r,self%f)
-  END IF
-END IF
-!---
+REAL(8) :: goptmp(3,3),v,psi(1),gpsi(3)
 psi_eval%u=>gs%psi
 CALL psi_eval%setup(gs%device%fe_rep)
 psi_geval%u=>gs%psi
 CALL psi_geval%setup(gs%device%fe_rep)
-call smesh%jacobian(self%cell,self%f,goptmp,v)
-call psi_eval%interp(self%cell,self%f,goptmp,psi)
-call psi_geval%interp(self%cell,self%f,goptmp,gpsi)
+CALL gs%device%mesh%jacobian(cell,f,goptmp,v)
+CALL psi_eval%interp(cell,f,goptmp,psi)
+CALL psi_geval%interp(cell,f,goptmp,gpsi)
 CALL psi_eval%delete()
 CALL psi_geval%delete()
-btmp(1)= -gs%psiscale*gpsi(2)/self%r(1)
+btmp(1)= -gs%psiscale*gpsi(2)/r(1)
 IF(gs%mode==0)THEN
-  btmp(2)= gs%psiscale*(gs%ffp_scale*gs%I%f(psi(1))+gs%I%f_offset)/self%r(1)
+  btmp(2)= gs%psiscale*(gs%ffp_scale*gs%I%f(psi(1))+gs%I%f_offset)/r(1)
 ELSE
-  btmp(2)=gs%psiscale*SIGN(1.d0,gs%I%f_offset)*SQRT(gs%ffp_scale*gs%I%f(psi(1)) + gs%I%f_offset**2)/self%r(1)
+  btmp(2)=gs%psiscale*SIGN(1.d0,gs%I%f_offset)*SQRT(gs%ffp_scale*gs%I%f(psi(1)) + gs%I%f_offset**2)/r(1)
 END IF
-btmp(3)= gs%psiscale*gpsi(1)/self%r(1)
-!---
-val = DOT_PRODUCT(btmp,self%v)
-END FUNCTION fit_field_eval
+btmp(3)= gs%psiscale*gpsi(1)/r(1)
+END SUBROUTINE fit_bvec_eval
+!---------------------------------------------------------------------------------
+!> Evaluate MSE constraint: \f$ \tan \gamma \f$ or \f$ \gamma = \arctan(\tan \gamma) \f$ [rad]
+!---------------------------------------------------------------------------------
+FUNCTION fit_mse_eval(self,gs) RESULT(val)
+CLASS(mse_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+REAL(8) :: val !< Modeled \f$ \tan \gamma \f$ or \f$ \gamma \f$ (NaN if the denominator is zero)
+REAL(8) :: btmp(3),num,den
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f)
+CALL fit_bvec_eval(gs,self%cell,self%f,self%r,btmp)
+num = self%coefs(1)*btmp(3) + self%coefs(2)*btmp(1) + self%coefs(3)*btmp(2) + self%coefs(4)*self%efield(1)
+den = self%coefs(5)*btmp(3) + self%coefs(6)*btmp(1) + self%coefs(7)*btmp(2) + self%coefs(8)*self%efield(1) &
+  + self%coefs(9)*self%efield(2)
+IF(den==0.d0)THEN ! Undefined: NaN marks the evaluation as failed in the fit (as any NaN constraint value)
+  val = ieee_value(val,ieee_quiet_nan)
+  RETURN
+END IF
+val = num/den
+IF(self%quantity==2)val = ATAN(val)
+END FUNCTION fit_mse_eval
+!---------------------------------------------------------------------------------
+!> No 3D error field compensation for MSE constraints
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_mse_setup_comp(self)
+CLASS(mse_constraint), INTENT(inout) :: self !< Constraint
+self%ncomp=0
+END SUBROUTINE fit_mse_setup_comp
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------

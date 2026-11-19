@@ -185,6 +185,75 @@ def test_recon_finite_probe():
     assert abs(finite[4] - center[4]) <= 2.3E-16*abs(center[4])
 
 
+far_point = [40.0, 0.0]  # Outside the ITER mesh
+
+
+def run_offmesh_case(mp_q):
+    mygs, _ = solve_ITER_reference(1.0, 2)
+    if mygs is None:
+        mp_q.put(None)
+        return
+    myrecon = reconstruction(mygs)
+    myrecon.add_flux_loop([6.0, 0.5], 1.5, 0.01)
+    myrecon.add_flux_loop([6.0, 0.5], 1.5, 0.01, use=False)
+    myrecon.add_flux_loop(far_point, 1.5, 0.01)
+    myrecon.add_Mirnov([6.0, 0.5], [1.0, 0.0, 0.0], 0.25, 0.01)
+    myrecon.add_Mirnov([6.0, 0.5], [1.0, 0.0, 0.0], 0.25, 0.01, use=False)
+    myrecon.add_Mirnov(far_point, [1.0, 0.0, 0.0], 0.25, 0.01)
+    myrecon.add_Mirnov(far_point, [1.0, 0.0, 0.0], 0.25, 0.01, length=0.5, n_avg=4)
+    myrecon.add_pressure(far_point, 1.0E3, 10.0)
+    myrecon.set_Ip(1.5E7, 1.5E5, use=False)
+    myrecon.add_MSE(far_point, mse_coef_sets[0], 0.1, 0.01)
+    myrecon.setup_constraints()
+    err_mat = myrecon.eval_error()
+    projected = [(entry['index'], entry['points'], entry['distance']) for entry in myrecon.projected]
+    myrecon.read_fit_in()
+    use_read = [con.use for con in myrecon.get_constraints()]
+    # Nearest mesh boundary vertex to the far point (boundary edges belong to one cell only)
+    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+    mesh_pts, mesh_lc, _, _, _ = load_gs_mesh('ITER_mesh.h5')
+    edges = {}
+    for cell in mesh_lc:
+        for i in range(3):
+            edge = tuple(sorted((cell[i], cell[(i+1) % 3])))
+            edges[edge] = edges.get(edge, 0) + 1
+    bnodes = np.unique([node for edge, count in edges.items() if count == 1 for node in edge])
+    dist = np.sqrt(np.sum((mesh_pts[bnodes, :2] - np.array(far_point))**2, axis=1))
+    node = mesh_pts[bnodes[np.argmin(dist)], :2]
+    psi_node = mygs.get_field_eval('PSI').eval(node)[0]
+    dist_finite = 0.0
+    for pt in probe_points(far_point, [1.0, 0.0, 0.0], 0.5, 4):
+        dist_finite = max(dist_finite, np.sqrt(np.sum((mesh_pts[bnodes, :2] - pt)**2, axis=1)).min())
+    mp_q.put([{'err_mat': err_mat, 'projected': projected, 'use_read': use_read, 'dist': dist.min(),
+               'dist_finite': dist_finite, 'psi_node': psi_node}])
+
+
+def test_recon_offmesh_and_use():
+    '''Off-mesh constraints are reported after setup (row, number of moved points, distance to the nearest boundary
+    node), still evaluated at that node; unused constraints have zero weighted error and the same modeled signal as
+    their used twins, and the flag survives the constraint file'''
+    results = mp_run(run_offmesh_case, ())
+    assert results is not None
+    err_mat = results[0]['err_mat']
+    dist = results[0]['dist']
+    projected = results[0]['projected']
+    assert [(entry[0], entry[1]) for entry in projected] == [(2, 1), (5, 1), (6, 4), (7, 1), (9, 1)]
+    for entry in projected:
+        dist_exp = results[0]['dist_finite'] if entry[0] == 6 else dist
+        assert abs(entry[2] - dist_exp) <= 1.E-14*dist_exp
+    assert results[0]['dist_finite'] > dist
+    # The moved flux loop is evaluated at the boundary node
+    assert abs(err_mat[2, 1] - 2.0*np.pi*results[0]['psi_node']) <= 1.E-12*abs(err_mat[2, 1])
+    # Unused rows: zero weighted error, same model as the used twin, stored value kept
+    for used, unused in ((0, 1), (3, 4)):
+        assert err_mat[unused, 0] == 0.0
+        assert err_mat[unused, 1] == err_mat[used, 1]
+        assert err_mat[unused, 2] == err_mat[used, 2]
+        assert err_mat[used, 0] != 0.0
+    assert err_mat[8, 0] == 0.0
+    assert results[0]['use_read'] == [True, False, True, True, False, True, True, True, False, True]
+
+
 #============================================================================
 # Pure Python checks (mocked solver)
 #============================================================================
@@ -321,3 +390,78 @@ def test_recon_finite_probe_rejects_invalid_file(recon):
         stream.write('1\n\n14\n 6.0 2.0 0.0\n 1.0 0.0 0.0\n 0.1 0\n 0.25 100.0\n\n')
     with pytest.raises(ValueError, match='n_avg'):
         recon.read_fit_in()
+
+
+def add_every_type(recon, use):
+    '''Add one constraint of every type that can be added from Python'''
+    recon.add_flux_loop([6.0, 0.5], 1.5, 0.01, use=use)
+    recon.add_Mirnov([6.0, 0.5], [1.0, 0.0, 0.0], 0.25, 0.02, use=use)
+    recon.add_Mirnov([6.0, 0.5], [1.0, 0.0, 0.0], 0.25, 0.02, length=0.5, n_avg=4, use=use)
+    recon.add_pressure([6.0, 0.5], 1.0E3, 10.0, use=use)
+    recon.set_coil_currents({'PF1': 1.0E3, 'PF2': -2.0E3, 'VS': 0.0}, {'PF1': 10.0, 'PF2': 20.0, 'VS': 5.0},
+                            use={'PF1': use, 'PF2': use, 'VS': use})
+    recon.set_Ip(1.0E7, 1.0E5, use=use)
+    recon.set_DFlux(0.05, 0.005, use=use)
+    recon.add_MSE([6.0, 0.5], mse_coef_sets[0], 0.1, 0.01, use=use)
+
+
+def test_recon_use_round_trip(recon):
+    '''The used flag and the error survive the constraint file for every constraint type; an unused constraint is
+    written with weight -1/err, which the solver reads as weight 0'''
+    add_every_type(recon, False)
+    written = recon.get_constraints()
+    recon.write_fit_in()
+    with open(recon.con_file) as stream:
+        lines = stream.read().split('\n')
+    assert float(lines[4].split()[1]) == -100.0
+    recon.read_fit_in()
+    restored = recon.get_constraints()
+    assert len(restored) == len(written) == 10
+    for con_in, con_out in zip(written, restored):
+        assert type(con_out) is type(con_in)
+        assert con_out.use is False
+        assert con_out.err == pytest.approx(con_in.err, rel=1.E-15)
+    add_every_type(recon, True)
+    recon.write_fit_in()
+    recon.read_fit_in()
+    assert all(con.use is True for con in recon.get_constraints())
+
+
+def test_recon_zero_weight_read(recon):
+    '''A constraint written with weight 0 (the only unused form before the used flag) reads back as unused with no
+    error and is written again with weight 0'''
+    with open(recon.con_file, 'w') as stream:
+        stream.write('1\n\n7\n 6.0 0.5\n 1.5 0.0\n\n')
+    recon.read_fit_in()
+    restored = recon._flux_loops[0]
+    assert (restored.use, restored.err) == (False, None)
+    recon.write_fit_in()
+    with open(recon.con_file) as stream:
+        assert float(stream.read().split('\n')[4].split()[1]) == 0.0
+
+
+@pytest.mark.parametrize('use', ['yes', 1, None])
+def test_recon_rejects_invalid_use(recon, use):
+    '''The used flag must be a bool'''
+    with pytest.raises(ValueError, match='`use` must be True or False'):
+        recon.add_flux_loop([6.0, 0.5], 1.5, 0.01, use=use)
+    with pytest.raises(ValueError, match='`use` must be True or False'):
+        recon.add_MSE([6.0, 0.5], mse_coef_sets[0], 0.1, 0.01, use=use)
+    with pytest.raises(ValueError, match='`use` must be True or False'):
+        recon.set_coil_currents({'PF1': 1.0, 'PF2': 1.0, 'VS': 1.0}, {'PF1': 1.0, 'PF2': 1.0, 'VS': 1.0},
+                                use={'PF1': use})
+    assert recon.get_constraints() == []
+
+
+def test_recon_used_constraint_needs_error(recon):
+    '''Writing a used constraint without an error is rejected'''
+    recon.add_flux_loop([6.0, 0.5], 1.5, None)
+    with pytest.raises(ValueError, match='needs an error'):
+        recon.write_fit_in()
+
+
+def test_recon_coil_use_unknown_name(recon):
+    '''A used flag for a coil set without a target is rejected'''
+    with pytest.raises(KeyError, match='without a coil current target'):
+        recon.set_coil_currents({'PF1': 1.0, 'PF2': 1.0, 'VS': 1.0}, {'PF1': 1.0, 'PF2': 1.0, 'VS': 1.0},
+                                use={'CS1': False})

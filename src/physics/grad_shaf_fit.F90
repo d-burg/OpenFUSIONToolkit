@@ -35,6 +35,8 @@ PRIVATE
 !---------------------------------------------------------------------------------
 TYPE :: fit_constraint
   INTEGER(4) :: ncomp = 0 !< Number of non-axisymmetric compensations
+  INTEGER(i4) :: nproj = 0 !< Number of evaluation points moved onto the mesh boundary (off-mesh points)
+  REAL(r8) :: proj_dist = 0.d0 !< Largest distance an evaluation point was moved [m]
   REAL(8) :: wt = 1.d0 !< Constraint weight
   REAL(8) :: val = 0.d0 !< Constraint value
   REAL(8), POINTER, DIMENSION(:) :: nax_corr => NULL() !< Non-axisymmetric compensations
@@ -51,6 +53,8 @@ CONTAINS
   PROCEDURE :: get_nax => fit_dummy_nax_corr
   !> Does constraint use parallelism in calculation?
   PROCEDURE :: is_parallel => fit_dummy_parallel
+  !> Locate evaluation point(s) in the mesh
+  PROCEDURE :: locate => fit_dummy_locate
   !> Destructor
   PROCEDURE :: destroy => fit_destroy
 END TYPE fit_constraint
@@ -91,6 +95,8 @@ CONTAINS
   PROCEDURE :: eval => fit_field_eval
   !> Setup 3D error field compensation information
   PROCEDURE :: setup_comp => fit_field_setup_comp
+  !> Locate evaluation point in the mesh
+  PROCEDURE :: locate => fit_field_locate
 END TYPE field_constraint
 !---------------------------------------------------------------------------------
 !> Motional Stark effect (MSE) pitch angle constraint
@@ -126,6 +132,8 @@ TYPE, EXTENDS(field_constraint) :: flfield_constraint
 CONTAINS
   !> Evaluate constraint value
   PROCEDURE :: eval => fit_flfield_eval
+  !> Place and locate the averaging points in the mesh
+  PROCEDURE :: locate => fit_flfield_locate
   !> Destructor
   PROCEDURE :: destroy => fit_flfield_destroy
 END TYPE flfield_constraint
@@ -141,6 +149,8 @@ CONTAINS
   PROCEDURE :: error => fit_flux_error
   !> Evaluate constraint value
   PROCEDURE :: eval => fit_flux_eval
+  !> Locate evaluation point in the mesh
+  PROCEDURE :: locate => fit_flux_locate
 END TYPE flux_constraint
 !---------------------------------------------------------------------------------
 !> Saddle loop constraint
@@ -194,6 +204,8 @@ CONTAINS
   PROCEDURE :: error => fit_press_error
   !> Evaluate constraint value
   PROCEDURE :: eval => fit_press_eval
+  !> Locate evaluation point in the mesh
+  PROCEDURE :: locate => fit_press_locate
 END TYPE press_constraint
 !---------------------------------------------------------------------------------
 !> Safety factor constraint
@@ -244,7 +256,7 @@ LOGICAL, PRIVATE :: linearized_fit = .FALSE. !< Needs docs
 TYPE(fit_constraint_ptr), POINTER, DIMENSION(:) :: conlist => NULL() !< Needs docs
 !---
 PUBLIC fit_constraint, field_constraint, itor_constraint, fit_pm
-PUBLIC fit_constraint_ptr, fit_gs, fit_gs_error, fit_load, fit_gs_setup, fit_gs_destroy
+PUBLIC fit_constraint_ptr, fit_gs, fit_gs_error, fit_load, fit_gs_setup, fit_gs_destroy, fit_gs_locate
 CONTAINS
 !---------------------------------------------------------------------------------
 !> Needs Docs
@@ -301,6 +313,24 @@ ELSE
   CLOSE(io_unit)
 END IF
 END SUBROUTINE fit_gs_error
+!---------------------------------------------------------------------------------
+!> Locate the evaluation points of all constraints in the mesh and report those moved onto the boundary
+!!
+!! Off-mesh points are moved to the nearest boundary node, as on first evaluation; locating first does not
+!! change any later evaluation.
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_gs_locate(gs,constraints,loc_mat)
+TYPE(gs_equil), TARGET, INTENT(inout) :: gs !< Equilibrium
+TYPE(fit_constraint_ptr), POINTER, DIMENSION(:), INTENT(in) :: constraints !< Constraints
+REAL(r8), INTENT(inout) :: loc_mat(:,:) !< Per constraint: number of moved points, largest distance moved [m] [2,ncons]
+INTEGER(i4) :: i
+gs_active=>gs
+DO i=1,SIZE(constraints)
+  CALL constraints(i)%con%locate(gs)
+  loc_mat(1,i)=REAL(constraints(i)%con%nproj,r8)
+  loc_mat(2,i)=constraints(i)%con%proj_dist
+END DO
+END SUBROUTINE fit_gs_locate
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
@@ -1336,6 +1366,13 @@ LOGICAL :: is_parallel !< Needs docs
 is_parallel=.FALSE.
 END FUNCTION fit_dummy_parallel
 !---------------------------------------------------------------------------------
+!> Locate evaluation points (nothing to locate for constraints without a location)
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_dummy_locate(self,gs)
+CLASS(fit_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+END SUBROUTINE fit_dummy_locate
+!---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
 SUBROUTINE fit_destroy(self)
@@ -1477,21 +1514,32 @@ CLASS(field_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
 REAL(8) :: btmp(3)
-IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f)
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 CALL fit_bvec_eval(gs,self%cell,self%f,self%r,btmp)
 !---
 val = DOT_PRODUCT(btmp,self%v)
 END FUNCTION fit_field_eval
 !---------------------------------------------------------------------------------
+!> Locate field constraint point in the mesh
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_field_locate(self,gs)
+CLASS(field_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
+END SUBROUTINE fit_field_locate
+!---------------------------------------------------------------------------------
 !> Find the mesh cell containing a constraint point
 !!
-!! A point outside the mesh is moved to the nearest boundary node
+!! A point outside the mesh is moved to the nearest boundary node; the move is counted in `nproj` and its
+!! distance kept in `proj_dist` if it is the largest so far
 !---------------------------------------------------------------------------------
-SUBROUTINE fit_locate_point(smesh,r,cell,f)
+SUBROUTINE fit_locate_point(smesh,r,cell,f,nproj,proj_dist)
 CLASS(oft_bmesh), INTENT(in) :: smesh !< Mesh
 REAL(r8), INTENT(inout) :: r(3) !< Location of the point (R, Z, 0); replaced by the boundary node if projected
 INTEGER(i4), INTENT(inout) :: cell !< Cell containing the point (0 on input)
 REAL(r8), INTENT(out) :: f(3) !< Logical coordinates of the point in `cell`
+INTEGER(i4), INTENT(inout) :: nproj !< Number of points moved onto the boundary
+REAL(r8), INTENT(inout) :: proj_dist !< Largest distance a point was moved [m]
 REAL(r8) :: rmin,rdiff
 INTEGER(i4) :: i,ip
 CALL bmesh_findcell(smesh,cell,r,f)
@@ -1506,6 +1554,8 @@ IF((MINVAL(f)<-1.d-6).OR.(MAXVAL(f)>1.d0+1.d-6))THEN
     END IF
   END DO
   IF(oft_debug_print(1))WRITE(*,*)'Point projected',r,smesh%r(:,smesh%lbp(ip))
+  nproj=nproj+1
+  proj_dist=MAX(proj_dist,SQRT(rmin))
   r=smesh%r(:,smesh%lbp(ip))
   cell=0
   CALL bmesh_findcell(smesh,cell,r,f)
@@ -1550,7 +1600,7 @@ CLASS(mse_constraint), INTENT(inout) :: self !< Constraint
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
 REAL(r8) :: val !< Modeled \f$ \tan \gamma \f$ or \f$ \gamma \f$
 REAL(r8) :: btmp(3),num,den
-IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f)
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 CALL fit_bvec_eval(gs,self%cell,self%f,self%r,btmp)
 num = self%coefs(1)*btmp(3) + self%coefs(2)*btmp(1) + self%coefs(3)*btmp(2) + self%coefs(4)*self%efield(1)
 den = self%coefs(5)*btmp(3) + self%coefs(6)*btmp(1) + self%coefs(7)*btmp(2) + self%coefs(8)*self%efield(1) &
@@ -1574,7 +1624,7 @@ TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
 REAL(r8) :: val !< Modeled signal
 INTEGER(i4) :: k
 REAL(r8) :: btmp(3)
-IF(.NOT.ASSOCIATED(self%cells))CALL fit_flfield_setup(self,gs)
+IF(.NOT.ASSOCIATED(self%cells))CALL fit_flfield_locate(self,gs)
 val=0.d0
 DO k=1,self%npts
   CALL fit_bvec_eval(gs,self%cells(k),self%fs(:,k),self%pts(:,k),btmp)
@@ -1585,11 +1635,12 @@ END FUNCTION fit_flfield_eval
 !---------------------------------------------------------------------------------
 !> Place and locate the averaging points of a finite-length probe (off-mesh points are projected)
 !---------------------------------------------------------------------------------
-SUBROUTINE fit_flfield_setup(self,gs)
+SUBROUTINE fit_flfield_locate(self,gs)
 CLASS(flfield_constraint), INTENT(inout) :: self !< Constraint
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
 INTEGER(i4) :: k
 REAL(r8) :: t(2),tnorm,s
+IF(ASSOCIATED(self%cells))RETURN
 ALLOCATE(self%cells(self%npts),self%fs(3,self%npts),self%pts(3,self%npts))
 t=0.d0
 tnorm=SQRT(self%v(1)**2+self%v(3)**2)
@@ -1604,9 +1655,9 @@ DO k=1,self%npts
   s=(REAL(k-1,r8)-0.5d0*REAL(self%npts-1,r8))*ABS(self%length)/REAL(self%npts,r8)
   self%pts(:,k)=[self%r(1)+s*t(1),self%r(2)+s*t(2),0.d0]
   self%cells(k)=0
-  CALL fit_locate_point(gs%device%mesh,self%pts(:,k),self%cells(k),self%fs(:,k))
+  CALL fit_locate_point(gs%device%mesh,self%pts(:,k),self%cells(k),self%fs(:,k),self%nproj,self%proj_dist)
 END DO
-END SUBROUTINE fit_flfield_setup
+END SUBROUTINE fit_flfield_locate
 !---------------------------------------------------------------------------------
 !> Destroy finite-length probe constraint
 !---------------------------------------------------------------------------------
@@ -1644,28 +1695,10 @@ CLASS(flux_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
 TYPE(oft_lag_brinterp) :: psi_eval
-REAL(8) :: goptmp(3,3),v,psi(1),rmin,rdiff
-INTEGER(4) :: i,ip
+REAL(8) :: goptmp(3,3),v,psi(1)
 CLASS(oft_bmesh), POINTER :: smesh
 smesh=>gs%device%mesh
-IF(self%cell==0)THEN
-  call bmesh_findcell(smesh,self%cell,self%r,self%f)
-  IF((minval(self%f)<-1.d-6).OR.(maxval(self%f)>1.d0+1.d-6))THEN
-    ip=0
-    rmin=1.d99
-    DO i=1,smesh%nbp
-      rdiff=SUM((self%r-smesh%r(:,smesh%lbp(i)))**2)
-      IF(rdiff<rmin)THEN
-        rmin=rdiff
-        ip=i
-      END IF
-    END DO
-    IF(oft_debug_print(1))WRITE(*,*)'Point projected',self%r,smesh%r(:,smesh%lbp(ip))
-    self%r=smesh%r(:,smesh%lbp(ip))
-    self%cell=0
-    call bmesh_findcell(smesh,self%cell,self%r,self%f)
-  END IF
-END IF
+IF(self%cell==0)CALL fit_locate_point(smesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 !---
 psi_eval%u=>gs%psi
 CALL psi_eval%setup(gs%device%fe_rep)
@@ -1675,6 +1708,14 @@ CALL psi_eval%delete()
 !---
 val = psi(1)*2.d0*pi
 END FUNCTION fit_flux_eval
+!---------------------------------------------------------------------------------
+!> Locate flux loop point in the mesh
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_flux_locate(self,gs)
+CLASS(flux_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
+END SUBROUTINE fit_flux_locate
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
@@ -1829,32 +1870,14 @@ CLASS(press_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
 TYPE(oft_lag_brinterp) :: psi_eval
-REAL(8) :: goptmp(3,3),v,psi(1),rmin,rdiff
-INTEGER(4) :: i,ip
+REAL(8) :: goptmp(3,3),v,psi(1)
 CLASS(oft_bmesh), POINTER :: smesh
 smesh=>gs%device%mesh
 IF(self%r(1)<0.d0)THEN ! Magnetic axis pressure constraint
   val = gs%psiscale*gs%psiscale*gs%p_scale*gs%P%f(gs%plasma_bounds(2))/mu0
   RETURN
 END IF
-IF(self%cell==0)THEN
-  call bmesh_findcell(smesh,self%cell,self%r,self%f)
-  IF((minval(self%f)<-1.d-6).OR.(maxval(self%f)>1.d0+1.d-6))THEN
-    ip=0
-    rmin=1.d99
-    DO i=1,smesh%nbp
-      rdiff=SUM((self%r-smesh%r(:,smesh%lbp(i)))**2)
-      IF(rdiff<rmin)THEN
-        rmin=rdiff
-        ip=i
-      END IF
-    END DO
-    IF(oft_debug_print(1))WRITE(*,*)'Point projected',self%r,smesh%r(:,smesh%lbp(ip))
-    self%r=smesh%r(:,smesh%lbp(ip))
-    self%cell=0
-    call bmesh_findcell(smesh,self%cell,self%r,self%f)
-  END IF
-END IF
+IF(self%cell==0)CALL fit_locate_point(smesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 !---
 psi_eval%u=>gs%psi
 CALL psi_eval%setup(gs%device%fe_rep)
@@ -1864,4 +1887,13 @@ CALL psi_eval%delete
 !---
 val = gs%psiscale*gs%psiscale*gs%p_scale*gs%P%f(psi(1))/mu0
 END FUNCTION fit_press_eval
+!---------------------------------------------------------------------------------
+!> Locate pressure constraint point in the mesh (none for the magnetic axis form, R < 0)
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_press_locate(self,gs)
+CLASS(press_constraint), INTENT(inout) :: self !< Constraint
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+IF(self%r(1)<0.d0)RETURN
+IF(self%cell==0)CALL fit_locate_point(gs%device%mesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
+END SUBROUTINE fit_press_locate
 END MODULE oft_gs_fit

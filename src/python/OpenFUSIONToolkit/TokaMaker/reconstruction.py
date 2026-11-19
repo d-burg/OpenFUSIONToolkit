@@ -246,7 +246,12 @@ class Ip_con:
 
 
 class fluxLoop_con:
-    '''! TokaMaker equilibrium reconstruction full flux loop constraint'''
+    r'''! TokaMaker equilibrium reconstruction full flux loop constraint
+
+    The modeled signal is \f$ 2\pi\psi(R,Z) \f$ [Wb], with \f$ \psi \f$ TokaMaker's poloidal flux per radian (as returned
+    by `get_field_eval('PSI')`). A flux in the COCOS 11 (IMAS) convention equals \f$ -2\pi\psi \f$, so it enters with the
+    opposite sign (see \ref doc_tokamaker_recon_constraints).
+    '''
     def __init__(self, loc=None, val=None, err=None, use=True):
         '''! Create full flux loop sensor constraint
 
@@ -655,7 +660,11 @@ class tokamaker_recon_settings:
 
 
 class reconstruction():
-    '''! TokaMaker equilibrium reconstruction class'''
+    '''! TokaMaker equilibrium reconstruction class
+
+    The constraint types, their modeled signals, sign conventions and file records are described in
+    \\ref doc_tokamaker_recon_constraints.
+    '''
     def __init__(self,tMaker_obj,in_filename='fit.in',out_filename='fit.out'):
         '''! Create equilibrium reconstruction object
 
@@ -770,10 +779,11 @@ class reconstruction():
                                                             use=use.get(name, True)))
 
     def add_flux_loop(self,loc,val,err,use=True):
-        '''! Add full poloidal flux loop constraint
+        r'''! Add full poloidal flux loop constraint
 
         @param loc Location of flux loop in R-Z plane [2]
-        @param val Value of flux loop constraint
+        @param val Value of flux loop constraint [Wb], in TokaMaker's sign convention (modeled as \f$ 2\pi\psi \f$; a
+        COCOS 11 flux enters with the opposite sign, see \ref doc_tokamaker_recon_constraints)
         @param err Error in constraint
         @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''

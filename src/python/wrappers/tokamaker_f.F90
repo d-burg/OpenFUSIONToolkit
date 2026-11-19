@@ -41,7 +41,7 @@ USE oft_gs_fit, ONLY: fit_gs, fit_gs_error, fit_gs_setup, fit_gs_destroy, fit_co
 USE oft_gs_td, ONLY: oft_tmaker_td, eig_gs_td
 USE grad_shaf_prof_phys, ONLY: create_dipole_b0_prof, dipole_ani_press, mirror_ani_slosh, gs_flux_int
 USE grad_shaf_bootstrap, ONLY: jphi_bs_flux_func, sauter_fc, saw_reset_1d, boot_prof_access, jphi_bs_carry_ffp, &
-  jphi_bs_missing_inputs
+  jphi_bs_missing_inputs, bootstrap_eval, imp_density
 USE diagnostic, ONLY: bscal_surf_int
 USE oft_base_f, ONLY: copy_string, copy_string_rev, oftpy_init
 IMPLICIT NONE
@@ -101,6 +101,8 @@ TYPE, BIND(C) :: tokamaker_boot_ops_type
   REAL(c_double)  :: saw_relax = 1.d0             !< Under-relaxation of jphi_saw
   REAL(c_double)  :: saw_ramp = 1.d-2             !< Reset weight ramp in q deficit (0 = hard trigger)
   INTEGER(c_int)  :: saw_rule = 2                 !< Reset rule: 1 fuse (axis to rho_m), 2 local (each dip, two-sided)
+  INTEGER(c_int)  :: ln_lambda_model = 1          !< Coulomb logarithms: 1 NRL, 2 Sauter 1999
+  LOGICAL(c_bool) :: imp_pressure = .FALSE.       !< Count the impurity in the ion pressure
 END TYPE tokamaker_boot_ops_type
 !---------------------------------------------------------------------------------
 !> TokaMaker wrapper object for Python API
@@ -656,6 +658,8 @@ TYPE IS (jphi_bs_flux_func)
   I%boot_ops%saw_relax = bops%saw_relax
   I%boot_ops%saw_ramp = bops%saw_ramp
   I%boot_ops%saw_rule = bops%saw_rule
+  I%boot_ops%ln_lambda_model = bops%ln_lambda_model
+  I%boot_ops%imp_pressure = bops%imp_pressure
 CLASS DEFAULT
   CALL copy_string('Run set_profiles with a jphi-split-bootstrap profile before calling set_boot_ops.',error_str)
 END SELECT
@@ -691,6 +695,8 @@ TYPE IS (jphi_bs_flux_func)
   bops%saw_relax = I%boot_ops%saw_relax
   bops%saw_ramp = I%boot_ops%saw_ramp
   bops%saw_rule = I%boot_ops%saw_rule
+  bops%ln_lambda_model = I%boot_ops%ln_lambda_model
+  bops%imp_pressure = I%boot_ops%imp_pressure
 CLASS DEFAULT
   initialized = .FALSE. ! Not a bootstrap profile: no options
 END SELECT
@@ -774,6 +780,67 @@ INTEGER(i4) :: n_dips
 CALL saw_reset_1d(n,rho,q,itor,area,c1,q_s,dq,ramp,rule,q_new,dj,wr,scal(1),scal(2),scal(5),n_dips,scal(4),ierr)
 scal(3) = REAL(n_dips,8)
 END SUBROUTINE tokamaker_saw_reset_1d
+!---------------------------------------------------------------------------------
+!> Bootstrap current of the jphi-split-bootstrap model (@ref grad_shaf_bootstrap::bootstrap_eval) on the
+!! current equilibrium at given nodes and kinetic profiles, without changing the equilibrium or any
+!! bootstrap solve state. A node at the LCFS (psi_in = 0) is not used: its current is extrapolated as
+!! in the solve, and its f_t and nu* are left at zero.
+!---------------------------------------------------------------------------------
+SUBROUTINE tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model, &
+    imp_mode,profs,error_str) BIND(C,NAME="tokamaker_eval_bootstrap")
+TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
+INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Number of nodes
+REAL(c_double), INTENT(in) :: psi_in(npsi) !< Normalized \f$ \psi \f$ of the nodes (0 at the LCFS, 1 at the axis), increasing
+REAL(c_double), INTENT(in) :: te(npsi) !< Electron temperature [keV]
+REAL(c_double), INTENT(in) :: ti(npsi) !< Ion temperature [keV]
+REAL(c_double), INTENT(in) :: ne(npsi) !< Electron density [m^-3]
+REAL(c_double), INTENT(in) :: ni(npsi) !< Main-ion density [m^-3]
+REAL(c_double), INTENT(in) :: zeff(npsi) !< Effective charge
+REAL(c_double), INTENT(in) :: nimp(npsi) !< Impurity density [m^-3] (used if imp_mode = 2)
+INTEGER(c_int), VALUE, INTENT(in) :: ln_lambda_model !< Coulomb logarithms: 1 NRL, 2 Sauter 1999
+INTEGER(c_int), VALUE, INTENT(in) :: imp_mode !< Impurity in the ion pressure: 0 none, 1 @ref grad_shaf_bootstrap::imp_density, 2 nimp
+REAL(c_double), INTENT(out) :: profs(npsi,6) !< <j_BS.B> [T A/m^2], field-aligned and pressure-driven jphi [A/m^2], f_t, nu_e*, nu_i*
+CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
+INTEGER(i4) :: i0,n,ierr
+REAL(r8), ALLOCATABLE :: te_ev(:),ti_ev(:),nz(:),jdotB(:),jphi_bs(:),jphi_pd(:)
+TYPE(gs_equil), POINTER :: tMaker_equil_obj
+IF(.NOT.tokamaker_equil_ccast(tMaker_equil_ptr,tMaker_equil_obj,error_str))RETURN
+IF(tMaker_equil_obj%plasma_bounds(1)<-1.d98)THEN
+  CALL copy_string('No equilibrium: solve before evaluating the bootstrap current',error_str)
+  RETURN
+END IF
+IF((ln_lambda_model<1).OR.(ln_lambda_model>2).OR.(imp_mode<0).OR.(imp_mode>2))THEN
+  CALL copy_string('Invalid ln_lambda_model or impurity option',error_str)
+  RETURN
+END IF
+profs=0.d0
+i0=MERGE(2,1,psi_in(1)==0.d0) ! The LCFS is not a node
+n=npsi-i0+1
+ALLOCATE(te_ev(n),ti_ev(n),nz(n),jdotB(0:n),jphi_bs(0:n),jphi_pd(0:n))
+te_ev=te(i0:npsi)*1000.0_r8
+ti_ev=ti(i0:npsi)*1000.0_r8
+nz=nimp(i0:npsi)
+IF(imp_mode==1)CALL imp_density(n,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi),nz)
+! P' of the equilibrium, p_scale*P%fp (as gs_ffprim_pprime)
+IF(imp_mode==0)THEN
+  CALL bootstrap_eval(tMaker_equil_obj,n,psi_in(i0:npsi),te_ev,ti_ev,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi), &
+    tMaker_equil_obj%p_scale,ln_lambda_model,jdotB,jphi_bs,jphi_pd,ierr, &
+    ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6))
+ELSE
+  CALL bootstrap_eval(tMaker_equil_obj,n,psi_in(i0:npsi),te_ev,ti_ev,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi), &
+    tMaker_equil_obj%p_scale,ln_lambda_model,jdotB,jphi_bs,jphi_pd,ierr,nimp=nz, &
+    ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6))
+END IF
+IF(ierr/=0)THEN
+  CALL copy_string('Bootstrap evaluation failed (see warning)',error_str)
+  RETURN
+END IF
+profs(i0:npsi,1)=jdotB(1:n)
+profs(i0:npsi,2)=jphi_bs(1:n)-jphi_pd(1:n)
+profs(i0:npsi,3)=jphi_pd(1:n)
+IF(i0==2)profs(1,1:3)=[jdotB(0),jphi_bs(0)-jphi_pd(0),jphi_pd(0)]
+DEALLOCATE(te_ev,ti_ev,nz,jdotB,jphi_bs,jphi_pd)
+END SUBROUTINE tokamaker_eval_bootstrap
 !---------------------------------------------------------------------------------
 !> Initialize \f$ \psi \f$ using a uniform or specified current source
 !---------------------------------------------------------------------------------

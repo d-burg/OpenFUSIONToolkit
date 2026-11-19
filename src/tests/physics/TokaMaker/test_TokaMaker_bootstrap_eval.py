@@ -22,7 +22,8 @@ def _carbon_case(ne, Zeff):
     return ne*(6.0 - Zeff)/5.0, ne*(Zeff - 1.0)/30.0
 
 
-def _python_bootstrap(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None, ln_lambda='NRL', solver_gradients=True):
+def _python_bootstrap(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None, ln_lambda='NRL', solver_gradients=True,
+                      coefficient_model='redl'):
     '''bootstrap.redl_bootstrap with the internal solver's settings at the interior nodes x[1:-1], with the
     geometry of the current equilibrium sampled as solve_with_bootstrap(use_python_solve=True) samples it.
     Gradients are taken as the solver takes them (on psi in its node order, 0 at the LCFS, without the LCFS
@@ -54,7 +55,7 @@ def _python_bootstrap(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None, ln_lambda='NRL',
                                    dp_dpsi=(ne*dTe + Te*dne + nit*dTi + Ti*dnit)*EC,
                                    ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
                                    use_legacy_L34=False, use_sign_q=False, ion_collisionality_model='Zavg_Zeff',
-                                   formula_form='jboot1')
+                                   formula_form='jboot1', coefficient_model=coefficient_model)
     inv_R, B2 = ravgs['<1/R>'], b_avgs[1]
     return {'jdotB_bs_raw': jdotB, 'jphi_bs_raw': jdotB*f*inv_R/B2, 'jphi_pd_raw': pp*(ravgs['<R>'] - f**2*inv_R/B2),
             'f_t': 1.0 - fc, 'nu_e_star': coeffs['nu_e_star'], 'nu_i_star': coeffs['nu_i_star'],
@@ -310,3 +311,271 @@ def test_ITER_bootstrap_eval_insolve(order):
     assert res['insolve_default_vs_opts'] > 3.0E-3  # measured 7.5E-3
     assert res['insolve_opts_vs_default'] > 3.0E-3  # the options reach the solve; measured 9.1E-3
     assert res['ops_loaded']
+
+
+## Smallest accepted change of <j.B> (relative to its peak) between bs_model 1 and 2 on the ITER case: a quarter of
+## the smallest measured (7.8E-2); an option that does not reach the evaluation changes nothing
+EFFECT_BOUND = 2.0E-2
+
+
+## Sauter et al. (1999) coefficients with the 2002 erratum from the public OMFIT function
+## omfit_classes.utils_fusion.sauter_bootstrap (version 'jboot1'), run once offline: L31, L32 and L34 recovered
+## from its returned terms with dT/dpsi = T and dn/dpsi = 0 (term1 = L31 p/p_e, term2 = L32,
+## term3 = L34 alpha (1-R_pe)/R_pe), alpha returned directly, at the collisionalities its nclass_conductivity
+## returns for the same inputs; 13 significant digits. Rows: f_t, nu_e*, nu_i*, Z_eff, L31, L32, L34, alpha.
+SAUTER_REFERENCE = (
+    (0.3, 0.0011580234468042622, 0.010164169864218536, 1.0,
+     4.1782939093464e-01, -2.0722863870829e-01, 4.1780020973256e-01, -8.2852618809245e-01),
+    (0.7, 0.007714358034249874, 0.0666576134705423, 1.5,
+     7.3743481607982e-01, -1.2154049464633e-01, 7.3699733844869e-01, -3.8354702412615e-01),
+    (0.9, 0.0023160468936085244, 0.02032833972843707, 2.0,
+     8.9467711646289e-01, -4.7773163852354e-02, 8.9451176776512e-01, -1.6211822976899e-01),
+    (0.5, 0.15119538018609732, 1.2590332852046313, 1.5,
+     4.6846241534750e-01, -4.2670878303651e-02, 4.6500222915857e-01, -3.0111405082665e-01),
+    (0.5, 1.956082319240309, 15.540250849985801, 1.0,
+     2.7268860465565e-01, 7.5956063278709e-02, 2.5297445426743e-01, 7.6864136088056e-01),
+    (0.3, 5.8682469577209275, 46.620752549957395, 3.0,
+     9.7792491806567e-02, 4.0409111273131e-02, 9.4447884949263e-02, 5.2410098109149e-01),
+    (0.1, 17.158296730857277, 132.45881210353147, 2.0,
+     1.6287672619070e-02, 6.3614274891763e-03, 1.5908757580498e-02, 2.6682814763846e-01),
+    (0.7, 149.99695774597808, 1120.0591517731846, 4.0,
+     4.9166483227364e-02, 1.4043300140095e-02, 3.6149613221117e-02, 2.0999148304661e+00),
+    (0.5, 8.579148365428638, 66.22940605176575, 1.0,
+     1.3673810540140e-01, 6.0980102427029e-02, 1.1664292854801e-01, 1.9283796707512e+00),
+    (0.7, 2.9341234788604638, 23.31037627497869, 1.5,
+     3.3561175566860e-01, 1.7397516232900e-01, 3.0388854734697e-01, 1.9058150783296e+00),
+    (0.9, 5.8682469577209275, 46.620752549957395, 3.0,
+     3.3444447576622e-01, 2.2969006394289e-01, 2.9840083731019e-01, 2.0881361719473e+00),
+    (0.98, 7.824329276961236, 62.16100339994321, 4.0,
+     3.2651182226506e-01, 2.2907791081579e-01, 2.9034129139124e-01, 2.0959332455707e+00),
+    (0.02, 0.15119538018609732, 1.2590332852046313, 1.5,
+     2.1558283861819e-02, -8.8084009162762e-03, 2.1550779281985e-02, -5.5818851084792e-01),
+    (0.3, 1415.7181083774653, 9704.651951311202, 2.0,
+     1.5418174145317e-03, 5.0637660390035e-04, 1.2999793160442e-03, 2.0998376805786e+00),
+)
+
+
+def test_sauter_coefficients():
+    '''bootstrap.sauter_coefficients (Sauter et al., Phys. Plasmas 6, 2834 (1999), eqs. 14-17, with the Erratum,
+    Phys. Plasmas 9, 5140 (2002)) against the public reference values of SAUTER_REFERENCE (banana, plateau and
+    collisional regimes, Z_eff 1 to 4), the erratum sign, limits that can be checked by hand, and the selection
+    in redl_bootstrap.
+
+    The coefficients are of order 1e-3 to 2; the reference values are rounded to 13 significant digits (at most
+    1E-13 absolute) and evaluated in a different order (a few 1E-16 measured), so the absolute bound 1E-12 is
+    ten times the rounding. The pre-erratum sign changes alpha by 2(0.315 w)/(1 + 0.15 w), w = nu_i*^2 f_t^6,
+    which exceeds 0.1 on the eight rows with w > 1; the hand limits are exact sums of a few O(1) terms (1E-14).
+    '''
+    from OpenFUSIONToolkit.TokaMaker.bootstrap import sauter_coefficients, redl_bootstrap
+    ref = np.array(SAUTER_REFERENCE)
+    ft, nue, nui, Z = ref[:, 0], ref[:, 1], ref[:, 2], ref[:, 3]
+    c = sauter_coefficients(ft, nue, nui, Z)
+    for k, key in enumerate(('L31', 'L32', 'L34', 'alpha')):
+        assert np.max(np.abs(c[key] - ref[:, 4 + k])) < 1.0E-12, key
+    assert np.array_equal(c['L32'], c['F32_ee'] + c['F32_ei'])
+    # The erratum sign: the 1999 sign of the 0.315 term disagrees with the reference where it matters
+    w = nui**2*ft**6
+    alpha_1999 = c['alpha'] - 2.0*0.315*w/(1.0 + 0.15*w)
+    assert np.count_nonzero(w > 1.0) == 8
+    assert np.min(np.abs(alpha_1999 - ref[:, 7])[w > 1.0]) > 0.1
+    # Limits: no trapped particles; f_t = 1 without collisions (F31(1) = 1, F32_ee(1) = -F32_ei(1), alpha0 = 0);
+    # the banana-regime alpha0 = -1.17; and nu* -> infinity, where alpha -> 0.315/0.15 = 2.1 (-2.1 before the erratum)
+    Zs = np.array([1.0, 1.5, 2.0, 3.0, 4.0])
+    zero, one = np.zeros(5), np.ones(5)
+    c = sauter_coefficients(zero, 0.3*one, 0.3*one, Zs)
+    assert all(np.all(c[key] == 0.0) for key in ('L31', 'L32', 'L34'))
+    c = sauter_coefficients(one, zero, zero, Zs)
+    assert np.max(np.abs(c['L31'] - 1.0)) < 1.0E-14 and np.max(np.abs(c['L34'] - 1.0)) < 1.0E-14
+    assert np.max(np.abs(c['L32'])) < 1.0E-14 and np.max(np.abs(c['alpha'])) < 1.0E-14
+    c = sauter_coefficients(zero, zero, zero, Zs)
+    assert np.max(np.abs(c['alpha'] + 1.17)) < 1.0E-14
+    c = sauter_coefficients(0.5*one, 1.0E12*one, 1.0E12*one, Zs)
+    assert np.max(np.abs(c['alpha'] - 2.1)) < 1.0E-12
+    assert max(np.max(np.abs(c[key])) for key in ('L31', 'L32', 'L34')) < 1.0E-9
+    # redl_bootstrap: 'sauter' uses these coefficients in the shared jboot1 assembly; invalid selections are rejected
+    n = 5
+    args = dict(psi_N=np.linspace(0.1, 0.9, n), Te=np.full(n, 3.0E3), Ti=np.full(n, 2.5E3), ne=np.full(n, 5.0E19),
+                ni=np.full(n, 4.0E19), pe=np.full(n, 2.4E4), pi=np.full(n, 1.6E4), Zeff=Zs, R=np.full(n, 6.2),
+                q=np.full(n, 2.0), eps=np.linspace(0.05, 0.3, n), fT=np.linspace(0.2, 0.6, n), I_psi=np.full(n, 33.0),
+                dT_e_dpsi=np.full(n, -2.0E3), dT_i_dpsi=np.full(n, -1.5E3), dn_e_dpsi=np.full(n, -1.0E19),
+                dn_i_dpsi=np.full(n, -8.0E18), formula_form='jboot1')
+    jb_s, cs = redl_bootstrap(**args, coefficient_model='sauter')
+    jb_r, cr = redl_bootstrap(**args)
+    c = sauter_coefficients(args['fT'], cs['nu_e_star'], cs['nu_i_star'], Zs)
+    assert all(np.array_equal(cs[key], c[key]) for key in ('L31', 'L32', 'L34', 'alpha'))
+    assert np.array_equal(cs['nu_e_star'], cr['nu_e_star']) and np.array_equal(cs['nu_i_star'], cr['nu_i_star'])
+    pe, Rpe = args['pe'], cs['R_pe']
+    dp = (args['ne']*args['dT_e_dpsi'] + args['Te']*args['dn_e_dpsi'] + args['ni']*args['dT_i_dpsi']
+          + args['Ti']*args['dn_i_dpsi'])*EC
+    jb = -args['I_psi']*pe*(c['L31']*dp/pe + c['L32']*args['dT_e_dpsi']/args['Te']
+                            + c['L34']*c['alpha']*(1.0 - Rpe)/Rpe*args['dT_i_dpsi']/args['Ti'])
+    assert np.array_equal(jb_s, jb)
+    assert _rel(jb_s, jb_r) > 1.0E-2
+    assert _rejects(redl_bootstrap, **args, coefficient_model='Sauter')
+    assert _rejects(redl_bootstrap, **args, coefficient_model='sauter', use_legacy_L34=True)
+
+
+def run_eval_sauter(mesh_resolution, fe_order, mp_q):
+    setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
+    if setup is None:
+        mp_q.put(None)
+        return
+    mygs, x, ne, Te = setup['mygs'], setup['psi_sample'], setup['ne'], setup['Te']
+    n = len(x)
+    Zeff = np.full(n, setup['Zeff_val'])
+    Te_k = Te/1e3
+    ni_c, nimp_c = _carbon_case(ne, setup['Zeff_val'])
+    results = {}
+    try:
+        # bs_model = 2 against redl_bootstrap(coefficient_model='sauter'), with both Coulomb logarithms and with the
+        # carbon impurity; the parts that do not depend on the coefficients equal those of bs_model = 1 bitwise
+        cases = {'nrl': (ne, None, 1, 'NRL'), 'imp': (ni_c, nimp_c, 2, 'sauter')}
+        for name, (ni, nimp, ln_model, ln_py) in cases.items():
+            F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ni, setup['Zeff_val'], nimp=nimp, ln_lambda_model=ln_model,
+                                    bs_model=2)
+            F1 = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ni, setup['Zeff_val'], nimp=nimp, ln_lambda_model=ln_model)
+            P = _python_bootstrap(mygs, x, Te_k*1e3, Te_k*1e3, ne, ni, Zeff, nimp=nimp, ln_lambda=ln_py,
+                                  coefficient_model='sauter')
+            for key in EVAL_KEYS:
+                results[f'{name}/{key}'] = _rel(F[key][1:-1], P[key])
+            results[f'{name}/shared'] = all(np.array_equal(F[key], F1[key], equal_nan=True)
+                                            for key in ('jphi_pd_raw', 'f_t', 'nu_e_star', 'nu_i_star'))
+            results[f'{name}/effect'] = _rel(F['jdotB_bs_raw'], F1['jdotB_bs_raw'])
+        # Invalid selections are rejected in Python; the Fortran entries reject them too
+        base = dict(psi=x, te=Te_k, ti=Te_k, ne=ne, ni=ne, Zeff=1.5)
+        for name, val in (('3', 3), ('0', 0), ('float', 2.0), ('bool', True), ('string', '2')):
+            results[f'rejects/eval_{name}'] = _rejects(mygs.eval_bootstrap, **dict(base, bs_model=val))
+            results[f'rejects/set_boot_ops_{name}'] = _rejects(mygs.set_boot_ops, bs_model=val)
+        from OpenFUSIONToolkit.TokaMaker._interface import tokamaker_eval_bootstrap
+        eq = mygs._tMaker_equil
+        err = eq._oft_env.get_c_errorbuff()
+        vals = [np.ascontiguousarray(v) for v in (1.0 - x[::-1], Te_k[::-1], Te_k[::-1], ne[::-1], ne[::-1],
+                                                  np.full(n, 1.5), np.zeros(n))]
+        tokamaker_eval_bootstrap(eq.c_ptr, n, *vals, 1, 0, 3, np.zeros((6, n)), err)
+        results['fortran_eval_rejects'] = b'Invalid bs_model' in err.value
+        # psi_convention = 1 gives the mirror of psi_convention = 0 bitwise
+        F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ni_c, setup['Zeff_val'], nimp=nimp_c, bs_model=2)
+        mygs._tMaker_equil.psi_convention = 1
+        try:
+            F_mirror = mygs.eval_bootstrap(1.0 - x[::-1], Te_k[::-1], Te_k[::-1], ne[::-1], ni_c[::-1],
+                                           setup['Zeff_val'], nimp=nimp_c[::-1], bs_model=2)
+        finally:
+            mygs._tMaker_equil.psi_convention = 0
+        results['mirror'] = all(F[key].tobytes() == F_mirror[key][::-1].tobytes() for key in EVAL_KEYS)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        mp_q.put(None)
+        return
+    mp_q.put([results])
+    oftpy_dump_cov()
+
+
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap_eval_sauter(order):
+    '''eval_bootstrap with bs_model = 2 (Sauter 1999 coefficients with the 2002 erratum) on the ITER equilibrium
+    with H-mode profiles equals bootstrap.redl_bootstrap(coefficient_model='sauter') with the internal solver's
+    settings, node by node, with both Coulomb logarithms and with a carbon impurity; the pressure-driven part,
+    f_t and the collisionalities equal those of bs_model = 1 bitwise (shared code), and <j.B> differs.
+
+    The bound 1E-12 of the peak is not a measured value: Fortran and numpy evaluate the same expressions in the same
+    order, and may differ only by the rounding of single operations (integer powers by multiplication or by pow,
+    fused multiply-add and division as compiled), a few units in the last place each over about a hundred
+    operations (1E-13), and by the cancellation of the three jboot1 terms against the peak (at most ten).
+    Invalid bs_model values raise ValueError in Python and an error from the Fortran entry, and psi_convention = 1
+    gives the mirror of psi_convention = 0 bitwise.
+    '''
+    results = mp_run(run_eval_sauter, (1.0, order), timeout=300)
+    assert results is not None
+    res = results[0]
+    for name in ('nrl', 'imp'):
+        for key in EVAL_KEYS:
+            assert res[f'{name}/{key}'] < 1.0E-12, f'{name}/{key}'
+        assert res[f'{name}/shared']
+        assert res[f'{name}/effect'] > EFFECT_BOUND, f'{name}/effect'
+    rejects = [key for key in res if key.startswith('rejects/')]
+    assert len(rejects) == 10
+    for key in rejects:
+        assert res[key], key
+    assert res['fortran_eval_rejects']
+    assert res['mirror']
+
+
+def run_sauter_insolve(mesh_resolution, fe_order, mp_q):
+    setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
+    if setup is None:
+        mp_q.put(None)
+        return
+    mygs, x, ne, Te = setup['mygs'], setup['psi_sample'], setup['ne'], setup['Te']
+    Zeff = setup['Zeff_val']
+    ni, _ = _carbon_case(ne, Zeff)
+    kwargs = dict(ffp_prof={'type': 'jphi-split-bootstrap', 'x': x, 'y': setup['inductive_jphi']},
+                  te_prof={'type': 'linterp', 'x': x, 'y': Te/1e3}, ne_prof={'type': 'linterp', 'x': x, 'y': ne},
+                  ti_prof={'type': 'linterp', 'x': x, 'y': Te/1e3}, ni_prof={'type': 'linterp', 'x': x, 'y': ni},
+                  Zeff=Zeff, Ip_target=setup['Ip_target'])
+    results = {}
+    try:
+        import ctypes
+        from OpenFUSIONToolkit.TokaMaker._interface import (tokamaker_boot_ops_struct, tokamaker_set_boot_ops,
+                                                            tokamaker_get_boot_ops)
+        bp_redl = mygs.solve_bootstrap(**kwargs)
+        bp = mygs.solve_bootstrap(**kwargs, bs_model=2)
+        results['insolve_model_effect'] = _rel(bp['jdotB_bs_raw'], bp_redl['jdotB_bs_raw'])
+        # eval_bootstrap takes bs_model from the solve and reproduces the solver's last evaluation (freeze tolerance)
+        F = mygs.eval_bootstrap(x, Te/1e3, Te/1e3, ne, ni, Zeff)
+        results['insolve'] = _rel(F['jdotB_bs_raw'], bp['jdotB_bs_raw'])
+        results['insolve_bs'] = _rel(F['jphi_bs_raw'], bp['jphi_bs_raw'])
+        # The option is in the Fortran state; an invalid value from the C interface is refused and changes nothing
+        eq = mygs._tMaker_equil
+        bops, initialized, err = tokamaker_boot_ops_struct(), ctypes.c_bool(False), eq._oft_env.get_c_errorbuff()
+        tokamaker_get_boot_ops(eq.c_ptr, ctypes.byref(bops), ctypes.byref(initialized), err)
+        results['fortran_ops'] = bool(initialized.value and bops.bs_model == 2)
+        bops.bs_model = 3
+        tokamaker_set_boot_ops(eq.c_ptr, ctypes.byref(bops), err)
+        results['fortran_set_rejects'] = b'Invalid bs_model' in err.value
+        bops, err = tokamaker_boot_ops_struct(), eq._oft_env.get_c_errorbuff()
+        tokamaker_get_boot_ops(eq.c_ptr, ctypes.byref(bops), ctypes.byref(initialized), err)
+        results['fortran_ops_kept'] = bool(bops.bs_model == 2)
+        # Saved and loaded with the equilibrium; a file without it (written before the option) loads the default
+        import h5py
+        eq.save_TokaMaker('ITER_boot_sauter_test.h5')
+        mygs.boot_reset()
+        results['reset'] = bool(mygs._tMaker_equil._boot_ops['bs_model'] == 1)
+        mygs.replace_eq(source_file='ITER_boot_sauter_test.h5')
+        results['loaded'] = bool(mygs._tMaker_equil._boot_ops['bs_model'] == 2)
+        with h5py.File('ITER_boot_sauter_test.h5', 'r+') as fid:
+            paths = []
+            fid.visit(lambda name: paths.append(name) if name.endswith('BOOT_OPS/BS_MODEL') else None)
+            for path in paths:
+                del fid[path]
+        results['n_removed'] = len(paths)
+        mygs.replace_eq(source_file='ITER_boot_sauter_test.h5')
+        os.remove('ITER_boot_sauter_test.h5')
+        results['loaded_old'] = bool(mygs._tMaker_equil._boot_ops['bs_model'] == 1)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        mp_q.put(None)
+        return
+    mp_q.put([results])
+    oftpy_dump_cov()
+
+
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap_sauter_insolve(order):
+    '''bs_model = 2 reaches the internal solve: the self-consistent ITER bootstrap solve with a carbon impurity
+    differs from the one with bs_model = 1, eval_bootstrap (taking bs_model from the solve) reproduces the solver's
+    last <j.B> to the level of its freeze tolerance (the bound of test_ITER_bootstrap_eval_insolve, 3E-4 of the
+    peak, and 3.5E-4 for the stored field-aligned part), the option is in the Fortran state and an invalid value
+    from the C interface is refused, boot_reset restores the default, and the option is saved and loaded with the
+    equilibrium, a file without it loading the default.
+    '''
+    results = mp_run(run_sauter_insolve, (1.0, order), timeout=300)
+    assert results is not None
+    res = results[0]
+    assert res['insolve_model_effect'] > EFFECT_BOUND
+    assert res['insolve'] < 3.0E-4
+    assert res['insolve_bs'] < 3.5E-4
+    for key in ('fortran_ops', 'fortran_set_rejects', 'fortran_ops_kept', 'reset', 'loaded', 'loaded_old'):
+        assert res[key], key
+    assert res['n_removed'] == 1

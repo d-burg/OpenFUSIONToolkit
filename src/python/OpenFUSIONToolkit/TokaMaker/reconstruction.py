@@ -59,6 +59,7 @@ saddle_con_id = 11
 coil_current_con_id = 12
 MSE_con_id = 13
 finite_Mirnov_con_id = 14
+coil_total_current_con_id = 15
 
 ## Format specification for real numbers in the constraint file: 17 significant digits, so every value is read back
 ## exactly as it was given
@@ -459,28 +460,35 @@ class saddle_con:
 class coil_current_con:
     '''! TokaMaker equilibrium reconstruction coil current constraint
 
-    The modeled signal is the coil set's total current [A] as returned by `get_coil_currents()`, including its share of
-    the virtual vertical stability coil.
+    The modeled signal is the coil set's current [A] (type 12, the default) or, with `total=True`, its total current as
+    returned by `get_coil_currents()`, which includes its share of the virtual vertical stability coil (type 15).
     '''
-    def __init__(self, ind=None, val=None, err=None, use=True):
+    def __init__(self, ind=None, val=None, err=None, use=True, total=False):
         '''! Create coil current constraint
 
         @param ind Index of coil
         @param val Value of constraint [A]
         @param err Error in constraint [A]
         @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
+        @param total Constrain the total current, including the virtual vertical stability coil share?
         '''
         self.ind = ind
         self.val = val
         self.err = None if err is None else _check_error(err)
         ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
         self.use = _check_use(use)
+        if not isinstance(total, (bool, numpy.bool_)):
+            raise ValueError("`total` must be True or False")
+        ## Constrain the total current (including the virtual vertical stability coil share)?
+        self.total = bool(total)
 
-    def read(self, file):
+    def read(self, file, total=False):
         '''! Read coil current constraint from file
 
         @param file Open file object containing constraint, must be positioned at start of constraint
+        @param total Read a total current record (type 15) instead of a coil current record (type 12)
         '''
+        self.total = total
         values = file.readline()
         self.ind = int(values) - 1
         values = file.readline().split()
@@ -492,7 +500,7 @@ class coil_current_con:
 
         @param file Open file object for saving constraints
         '''
-        file.write('{0}\n'.format(coil_current_con_id))
+        file.write('{0}\n'.format(coil_total_current_con_id if self.total else coil_current_con_id))
         file.write(' {0}\n'.format(self.ind+1))
         file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=con_file_real_format))
 
@@ -595,7 +603,8 @@ con_map = {
     saddle_con_id: saddle_con,
     coil_current_con_id: coil_current_con,
     MSE_con_id: MSE_con,
-    finite_Mirnov_con_id: Mirnov_con
+    finite_Mirnov_con_id: Mirnov_con,
+    coil_total_current_con_id: coil_current_con
 }
 
 
@@ -772,19 +781,27 @@ class reconstruction():
         '''
         self._Dflux_con = dFlux_con(val=DFlux, err=err, use=use)
 
-    def set_coil_currents(self,targets,errs,use=None):
+    def set_coil_currents(self,targets,errs,use=None,total=False):
         '''! Set coil current constraints
 
-        The constrained quantity is each coil set's total current, as returned by `get_coil_currents()` (including the
-        share of the virtual vertical stability coil). Coil sets without a target are not constrained.
+        The constrained quantity is each coil set's current or, with `total=True`, its total current as returned by
+        `get_coil_currents()` (including the share of the virtual vertical stability coil; see
+        \\ref doc_tokamaker_recon_constraints for its use with `fitCoils`). Coil sets without a target are not
+        constrained. All input is checked before the existing coil current constraints are replaced.
 
         @param targets Dictionary of coil current targets [A] by coil set name (any subset of the coil sets)
-        @param errs Dictionary of coil current constraint errors [A] (one for every target)
+        @param errs Dictionary of coil current constraint errors [A] (one for every target, no others)
         @param use Dictionary of used flags by coil set (default: all used); an unused constraint is evaluated but has
         zero weight
+        @param total Constrain total currents (True) or coil currents (False, the default), for all targets
         '''
         if use is None:
             use = {}
+        if not isinstance(total, (bool, numpy.bool_)):
+            raise ValueError("`total` must be True or False")
+        for name in errs:
+            if name not in targets:
+                raise KeyError(f"Coil current error given for coil set '{name}' without a coil current target")
         for name in targets:
             if name not in self._tMaker_obj.coil_sets:
                 raise KeyError(f"Unknown coil set '{name}'")
@@ -801,7 +818,7 @@ class reconstruction():
             if name not in targets:
                 continue
             self._coil_current_cons.append(coil_current_con(ind=coil_set['id'], val=targets[name], err=errs[name],
-                                                            use=use.get(name, True)))
+                                                            use=use.get(name, True), total=total))
 
     def add_flux_loop(self,loc,val,err,use=True):
         r'''! Add full poloidal flux loop constraint
@@ -918,6 +935,8 @@ class reconstruction():
                 new_con = new_con_class()
                 if con_type == finite_Mirnov_con_id:
                     new_con.read(fid, finite_length=True)
+                elif con_type == coil_total_current_con_id:
+                    new_con.read(fid, total=True)
                 else:
                     new_con.read(fid)
                 if con_type == Ip_con_id:
@@ -932,7 +951,7 @@ class reconstruction():
                     self._saddles.append(new_con)
                 elif con_type == Press_con_id:
                     self._pressure_cons.append(new_con)
-                elif con_type == coil_current_con_id:
+                elif con_type in (coil_current_con_id, coil_total_current_con_id):
                     self._coil_current_cons.append(new_con)
                 elif con_type == MSE_con_id:
                     self._mse_cons.append(new_con)

@@ -53,6 +53,37 @@ Press_con_id = 9
 q_con_id = 10
 saddle_con_id = 11
 coil_current_con_id = 12
+MSE_con_id = 13
+
+## @cond
+def _check_finite(name, value, shape=None):
+    '''Return `value` as a float array, raising `ValueError` unless it is finite (and of `shape`, if given)'''
+    try:
+        arr = numpy.asarray(value, dtype=numpy.float64)
+    except (TypeError, ValueError):
+        raise ValueError("{0} must be numeric".format(name))
+    if (shape is not None) and (arr.shape != shape):
+        raise ValueError("{0} must have shape {1}".format(name, shape))
+    if not numpy.all(numpy.isfinite(arr)):
+        raise ValueError("{0} must be finite".format(name))
+    return arr
+
+
+def _check_location(loc):
+    '''Return an R-Z location as a tuple of floats, raising `ValueError` unless it is finite with R > 0'''
+    loc = _check_finite('Location', loc, (2,))
+    if loc[0] <= 0.0:
+        raise ValueError("Location must have R > 0")
+    return (float(loc[0]), float(loc[1]))
+
+
+def _check_error(err):
+    '''Return a constraint error as a float, raising `ValueError` unless it is finite and positive'''
+    err = float(_check_finite('Error', err, ()))
+    if err <= 0.0:
+        raise ValueError("Error must be positive")
+    return err
+## @endcond
 
 
 class Mirnov_con:
@@ -351,6 +382,87 @@ class coil_current_con:
         file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./(self.err)))
 
 
+class MSE_con:
+    r'''! TokaMaker equilibrium reconstruction motional Stark effect (MSE) constraint
+
+    The modeled signal at the chord's measurement point is (IMAS coefficient order)
+    \f[ \tan \gamma = \frac{c_0 B_Z + c_1 B_R + c_2 B_\phi + c_3 E_R}{c_4 B_Z + c_5 B_R + c_6 B_\phi + c_7 E_R + c_8 E_Z} \f]
+    or \f$ \gamma = \arctan(\tan \gamma) \in (-\pi/2, \pi/2) \f$ [rad], with \f$ (B_R, B_\phi, B_Z) \f$ the field in
+    TokaMaker's right-handed \f$ (R, \phi, Z) \f$ frame (the components returned by `get_field_eval('B')`) and the
+    electric field \f$ (E_R, E_Z) \f$ supplied by the caller. Any map from a device's orientation (current or
+    toroidal field direction, sign of the measured angle) to this frame is the caller's statement and belongs in the
+    signs of the coefficients.
+    '''
+    ## Allowed values of `quantity` and their file codes
+    quantities = {'tan': 1, 'angle': 2}
+
+    def __init__(self, loc=None, coefs=None, val=None, err=None, quantity='tan', E_R=0., E_Z=0., phi=0.):
+        r'''! Create MSE constraint
+
+        @param loc Location of the measurement point in the R-Z plane [2]
+        @param coefs Geometry coefficients \f$ c_0 \ldots c_8 \f$ in IMAS order [9]
+        @param val Measured value (\f$ \tan \gamma \f$, or \f$ \gamma \f$ [rad] if `quantity='angle'`)
+        @param err Error in constraint (same units as `val`)
+        @param quantity Measured quantity, `'tan'` (\f$ \tan \gamma \f$) or `'angle'` (\f$ \gamma \f$ [rad])
+        @param E_R Radial electric field at the measurement point [V/m]
+        @param E_Z Vertical electric field at the measurement point [V/m]
+        @param phi Toroidal location [rad] (recorded only; fields are axisymmetric)
+        '''
+        if quantity not in MSE_con.quantities:
+            raise ValueError("MSE quantity must be one of {0}".format(tuple(MSE_con.quantities)))
+        self.quantity = quantity
+        self.loc = None if loc is None else _check_location(loc)
+        self.coefs = None
+        if coefs is not None:
+            self.coefs = tuple(float(c) for c in _check_finite('MSE coefficients', coefs, (9,)))
+            if not any(self.coefs[4:]):
+                raise ValueError("MSE denominator coefficients (c_4 ... c_8) must not all be zero")
+        self.val = None
+        if val is not None:
+            self.val = float(_check_finite('MSE value', val, ()))
+            if (quantity == 'angle') and (abs(self.val) >= numpy.pi/2.):
+                raise ValueError("MSE angle must lie in (-pi/2, pi/2)")
+        self.err = None if err is None else _check_error(err)
+        self.E_R = float(_check_finite('E_R', E_R, ()))
+        self.E_Z = float(_check_finite('E_Z', E_Z, ()))
+        self.phi = float(_check_finite('phi', phi, ()))
+
+    def read(self, file):
+        '''! Read MSE constraint from file
+
+        @param file Open file object containing constraint, must be positioned at start of constraint
+        '''
+        values = file.readline().split()
+        self.loc = (float(values[0]), float(values[1]))
+        self.phi = float(values[2])
+        self.coefs = tuple(float(value) for value in file.readline().split())
+        if len(self.coefs) != 9:
+            raise ValueError("Invalid MSE constraint in file: nine coefficients are required")
+        values = file.readline().split()
+        self.E_R = float(values[0])
+        self.E_Z = float(values[1])
+        code = int(file.readline())
+        quantity = [key for key, val in MSE_con.quantities.items() if val == code]
+        if len(quantity) != 1:
+            raise ValueError("Invalid MSE quantity in file")
+        self.quantity = quantity[0]
+        values = file.readline().split()
+        self.val = float(values[0])
+        self.err = 1./float(values[1])
+
+    def write(self, file):
+        '''! Write MSE constraint to file
+
+        @param file Open file object for saving constraints
+        '''
+        file.write('{0}\n'.format(MSE_con_id))
+        file.write(' {0:E} {1:E} {2:E}\n'.format(self.loc[0], self.loc[1], self.phi))
+        file.write(' ' + ' '.join('{0:E}'.format(c) for c in self.coefs) + '\n')
+        file.write(' {0:E} {1:E}\n'.format(self.E_R, self.E_Z))
+        file.write(' {0:d}\n'.format(MSE_con.quantities[self.quantity]))
+        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+
+
 con_map = {
     Mirnov_con_id: Mirnov_con,
     Ip_con_id: Ip_con,
@@ -359,7 +471,8 @@ con_map = {
     Press_con_id: Press_con,
     q_con_id: q_con,
     saddle_con_id: saddle_con,
-    coil_current_con_id: coil_current_con
+    coil_current_con_id: coil_current_con,
+    MSE_con_id: MSE_con
 }
 
 
@@ -466,6 +579,8 @@ class reconstruction():
         self._pressure_cons = []
         ## Coil current constraints
         self._coil_current_cons = []
+        ## MSE constraints
+        self._mse_cons = []
         ## Name of constraint file (input for reconstruction)
         self.con_file = in_filename
         ## Name of reconstruction output file
@@ -503,6 +618,7 @@ class reconstruction():
         self._saddles = []
         self._pressure_cons = []
         self._coil_current_cons = []
+        self._mse_cons = []
         self.con_file = None
         self.out_file = None
         self._ncons = 0
@@ -576,6 +692,24 @@ class reconstruction():
         '''
         self._pressure_cons.append(Press_con(loc=loc,val=val,err=err))
 
+    def add_MSE(self,loc,coefs,val,err,quantity='tan',E_R=0.,E_Z=0.,phi=0.):
+        r'''! Add motional Stark effect (MSE) constraint (see \ref OpenFUSIONToolkit.TokaMaker.reconstruction.MSE_con
+        "MSE_con" for the model and sign conventions)
+
+        @param loc Location of the measurement point in the R-Z plane [2]
+        @param coefs Geometry coefficients \f$ c_0 \ldots c_8 \f$ in IMAS order [9]
+        @param val Measured value (\f$ \tan \gamma \f$, or \f$ \gamma \f$ [rad] if `quantity='angle'`)
+        @param err Error in constraint (same units as `val`)
+        @param quantity Measured quantity, `'tan'` (\f$ \tan \gamma \f$) or `'angle'` (\f$ \gamma \f$ [rad])
+        @param E_R Radial electric field at the measurement point [V/m]
+        @param E_Z Vertical electric field at the measurement point [V/m]
+        @param phi Toroidal location [rad] (recorded only; fields are axisymmetric)
+        '''
+        for name, value in (('Location', loc), ('MSE coefficients', coefs), ('MSE value', val), ('Error', err)):
+            if value is None:
+                raise ValueError("{0} is required".format(name))
+        self._mse_cons.append(MSE_con(loc=loc, coefs=coefs, val=val, err=err, quantity=quantity, E_R=E_R, E_Z=E_Z, phi=phi))
+
     def reset_constraints(self):
         '''! Remove all current constraints'''
         self._Ip_con = None
@@ -585,14 +719,27 @@ class reconstruction():
         self._saddles = []
         self._pressure_cons = []
         self._coil_current_cons = []
+        self._mse_cons = []
 
-    def write_fit_in(self):
-        '''! Create reconstruction input file for specified constraints'''
+    def get_constraints(self):
+        '''! Get all constraints in the order of the constraint file and of the rows of `eval_error`
+
+        The order is: flux loops, Mirnov sensors, saddle loops, pressures, coil currents, plasma current, diamagnetic
+        flux, MSE.
+
+        @result List of constraint objects
+        '''
         constraints = self._flux_loops + self._mirnovs + self._saddles + self._pressure_cons + self._coil_current_cons
         if self._Ip_con is not None:
             constraints.append(self._Ip_con)
         if self._Dflux_con is not None:
             constraints.append(self._Dflux_con)
+        constraints += self._mse_cons
+        return constraints
+
+    def write_fit_in(self):
+        '''! Create reconstruction input file for specified constraints'''
+        constraints = self.get_constraints()
         ncons = len(constraints)
         with open(self.con_file, 'w+') as fid:
             fid.write('{0:d}\n\n'.format(ncons))
@@ -624,6 +771,8 @@ class reconstruction():
                     self._pressure_cons.append(new_con)
                 elif con_type == coil_current_con_id:
                     self._coil_current_cons.append(new_con)
+                elif con_type == MSE_con_id:
+                    self._mse_cons.append(new_con)
                 else:
                     raise ValueError("Unknown constraint type")
 
@@ -724,8 +873,9 @@ class reconstruction():
                                     len(self._pressure_cons),
                                     len(self._coil_current_cons),
                                     1 if self._Ip_con is not None else 0,
-                                    1 if self._Dflux_con is not None else 0])
-            names = ['Flux loops', 'Mirnovs', 'Saddle loops', 'Pressure', r'$I_C$', r'$I_p$', r'$\Delta \Phi$']
+                                    1 if self._Dflux_con is not None else 0,
+                                    len(self._mse_cons)])
+            names = ['Flux loops', 'Mirnovs', 'Saddle loops', 'Pressure', r'$I_C$', r'$I_p$', r'$\Delta \Phi$', 'MSE']
             chi_ax.set_title(r'Signal $\chi^2$ contributions')
             chi_ax.set_xlabel('Signal Index')
             chi_ax.set_ylabel(r'$\chi^2_i$')

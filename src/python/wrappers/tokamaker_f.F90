@@ -37,7 +37,7 @@ USE oft_gs, ONLY: gs_factory, gs_equil, gs_save_fields, gs_setup_walls, build_de
 USE oft_gs_util, ONLY: gs_comp_globals, gs_save_eqdsk, gs_save_ifile, gs_profile_load, gs_profile_save, &
   gs_calc_vloop, gs_save_tokamaker, gs_load_tokamaker
 USE oft_gs_profiles, ONLY: torflux_map, torflux_setup, torflux_attach, torflux_unwrap
-USE oft_gs_fit, ONLY: fit_gs, fit_gs_error, fit_gs_setup, fit_gs_destroy, fit_constraint_ptr, fit_pm
+USE oft_gs_fit, ONLY: fit_gs, fit_gs_error, fit_gs_setup, fit_gs_destroy, fit_constraint_ptr, fit_pm, fit_gs_locate
 USE oft_gs_td, ONLY: oft_tmaker_td, eig_gs_td
 USE grad_shaf_prof_phys, ONLY: create_dipole_b0_prof, dipole_ani_press, mirror_ani_slosh, gs_flux_int
 USE grad_shaf_bootstrap, ONLY: jphi_bs_flux_func, sauter_fc, saw_reset_1d, boot_prof_access, jphi_bs_carry_ffp, &
@@ -1009,6 +1009,31 @@ ELSE
 END IF
 tMaker_obj%gs_equil%has_plasma=.TRUE.
 END SUBROUTINE tokamaker_recon_err
+!---------------------------------------------------------------------------------
+!> Locate reconstruction constraints in the mesh and report those moved onto the mesh boundary
+!---------------------------------------------------------------------------------
+SUBROUTINE tokamaker_recon_locate(tMaker_ptr,loc_mat,error_flag) BIND(C,NAME="tokamaker_recon_locate")
+TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_ptr !< Pointer to TokaMaker object
+TYPE(c_ptr), VALUE, INTENT(in) :: loc_mat !< Number of moved points and largest distance moved per constraint [2,ncons]
+INTEGER(c_int), INTENT(out) :: error_flag !< Error flag (0 if no error)
+REAL(r8), POINTER :: loc_mat_tmp(:,:)
+TYPE(tokamaker_instance), POINTER :: tMaker_obj
+IF(.NOT.tokamaker_ccast(tMaker_ptr,tMaker_obj))THEN
+  error_flag=-100
+  RETURN
+END IF
+IF(.NOT.tokamaker_require_equil(tMaker_obj))THEN
+  error_flag=-101
+  RETURN
+END IF
+IF(.NOT.ASSOCIATED(tMaker_obj%recon_constraints))THEN
+  error_flag=-102
+  RETURN
+END IF
+error_flag=0
+CALL c_f_pointer(loc_mat, loc_mat_tmp, [2,SIZE(tMaker_obj%recon_constraints)])
+CALL fit_gs_locate(tMaker_obj%gs_equil,tMaker_obj%recon_constraints,loc_mat_tmp)
+END SUBROUTINE tokamaker_recon_locate
 !---------------------------------------------------------------------------------
 !> Compute eigenvalues/eigenvectors of linearized plasma-conductor system
 !---------------------------------------------------------------------------------

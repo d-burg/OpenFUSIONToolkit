@@ -18,7 +18,9 @@ Mirnov sensors, saddle loops, pressures, coil currents, plasma current, diamagne
 3. the constraint value \f$ v \f$ as read from the constraint file;
 4. the non-axisymmetric correction (zero unless conductor corrections are set up).
 
-The weight is \f$ w = 1/\sigma \f$ for the error \f$ \sigma \f$ given in Python.
+The weight is \f$ w = 1/\sigma \f$ for the error \f$ \sigma \f$ given in Python. For a pressure constraint at a
+point outside the plasma, column 1 compares the value with a linear extrapolation in \f$ \psi \f$ beyond the plasma
+boundary (which steers the fit) instead of the modeled signal of column 2.
 
 ## Modeled signals and sign conventions
 All quantities use TokaMaker's right-handed \f$ (R, \phi, Z) \f$ frame and its poloidal flux per radian
@@ -39,7 +41,7 @@ the plasma).
 | Coil current (12) | `set_coil_currents` | total coil current [A] as returned by `get_coil_currents()` (below) |
 | MSE (13) | `add_MSE` | \f$ \tan \gamma \f$ or \f$ \gamma \f$ (below) |
 
-**Flux sign.** Since \f$ B_Z = \frac{1}{R}\frac{\partial \psi}{\partial R} \f$ here, while COCOS 11 (IMAS) has
+**Flux sign.** Since \f$ B_Z = \frac{1}{R}\frac{\partial \psi}{\partial R} \f$ here, while COCOS 11 has
 \f$ B_Z = -\frac{1}{2\pi R}\frac{\partial \psi_{11}}{\partial R} \f$ with \f$ \psi_{11} \f$ per full turn, a flux loop signal in
 the COCOS 11 convention is \f$ \psi_{11} = -2\pi\psi \f$: it enters a flux loop constraint with the opposite sign.
 Field components, currents and the diamagnetic flux are physical quantities and need no conversion between the two.
@@ -62,7 +64,10 @@ With coefficients \f$ c_0 \ldots c_8 \f$ in the IMAS order and the electric fiel
 
 \f[ \tan \gamma = \frac{c_0 B_Z + c_1 B_R + c_2 B_\phi + c_3 E_R}{c_4 B_Z + c_5 B_R + c_6 B_\phi + c_7 E_R + c_8 E_Z} \f]
 
-and \f$ \gamma = \arctan(\tan \gamma) \in (-\pi/2, \pi/2) \f$ [rad] for `quantity='angle'`. The coefficients are defined in
+and \f$ \gamma = \arctan(\tan \gamma) \in (-\pi/2, \pi/2) \f$ [rad] for `quantity='angle'`, which jumps by \f$ \pi \f$
+where the denominator changes sign. A denominator that is exactly zero gives NaN: `eval_error()` warns, and in
+`reconstruct()` the evaluation counts as failed (the same treatment as any NaN constraint value). Coefficients and
+electric fields for which the denominator vanishes identically are rejected in Python. The coefficients are defined in
 the frame above; any map from a device's orientation (directions of the plasma current and toroidal field, sign
 convention of the measured angle) is the caller's statement and belongs in the signs of the coefficients. The EFIT
 form \f$ \tan\gamma = (A_1 B_Z + A_5 E_R)/(A_2 B_\phi + A_3 B_R + A_4 B_Z + A_6 E_Z + A_7 E_R) \f$ corresponds to
@@ -73,10 +78,15 @@ form \f$ \tan\gamma = (A_1 B_Z + A_5 E_R)/(A_2 B_\phi + A_3 B_R + A_4 B_Z + A_6 
 Every constraint takes `use` (default `True`). An unused constraint is written with weight \f$ -1/\sigma \f$; the solver
 clips weights at zero, so the row is still evaluated (columns 2 and 3) with zero weighted error and does not enter the
 fit, and the file reads back with the flag and the error. A weight of zero reads back as unused without an error.
+An error, if given, must be positive and finite for every type; a constraint is made unused only with `use=False`.
+Unused rows still count in the statistics `reconstruct()` prints (number of constraints, RMS weighted error and the
+optional confidence estimate).
 
 ## Off-mesh sensors
-An evaluation point outside the mesh is moved to the nearest mesh boundary node (the behavior of `reconstruct()` and
-`eval_error()` is unchanged). `setup_constraints()` reports such constraints in
+An evaluation point outside the mesh is moved to the nearest mesh boundary node, not to the nearest point of the
+boundary, so the move can be much larger than the distance to the mesh: on the ITER test mesh a point 1 cm outside the
+boundary moves 0.13 m (the behavior of `reconstruct()` and `eval_error()` is unchanged). `setup_constraints()` reports
+such constraints in
 \ref OpenFUSIONToolkit.TokaMaker.reconstruction.reconstruction.projected "projected" (row, number of moved points and
 the largest distance moved) and prints a warning. Saddle loop legs off the mesh stop the evaluation with an error.
 

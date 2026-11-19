@@ -257,7 +257,7 @@ class fluxLoop_con:
     r'''! TokaMaker equilibrium reconstruction full flux loop constraint
 
     The modeled signal is \f$ 2\pi\psi(R,Z) \f$ [Wb], with \f$ \psi \f$ TokaMaker's poloidal flux per radian (as returned
-    by `get_field_eval('PSI')`). A flux in the COCOS 11 (IMAS) convention equals \f$ -2\pi\psi \f$, so it enters with the
+    by `get_field_eval('PSI')`). A flux in the COCOS 11 convention equals \f$ -2\pi\psi \f$, so it enters with the
     opposite sign (see \ref doc_tokamaker_recon_constraints).
     '''
     def __init__(self, loc=None, val=None, err=None, use=True):

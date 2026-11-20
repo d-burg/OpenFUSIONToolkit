@@ -49,6 +49,7 @@ configure_file( test_TokaMaker_kinetic_current_model_pass_loop.py ${CMAKE_CURREN
 configure_file( test_TokaMaker_kinetic_q_floor.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_q_floor_continuous.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_q_floor_options.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
+configure_file( test_TokaMaker_kinetic_from_tokamaker.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( ITER_geom.json ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( ITER_test.eqdsk ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( ITER_test.ifile ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

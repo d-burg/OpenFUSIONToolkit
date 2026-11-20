@@ -66,6 +66,7 @@ new meshes, see \ref doc_gs_main_mesh_ex.
 
 \section doc_gs_main_conv Conventions
  - \subpage doc_tokamaker_current_conventions
+ - \subpage doc_tokamaker_recon_constraints
 
 \section doc_gs_main_lcfs Plasma integrals at the boundary (cut-cell quadrature)
 The setting `lcfs_rule` (\ref OpenFUSIONToolkit.TokaMaker._core.tokamaker_settings "TokaMaker settings") selects how

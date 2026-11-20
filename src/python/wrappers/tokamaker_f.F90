@@ -798,10 +798,10 @@ END SUBROUTINE tokamaker_saw_reset_1d
 !> Bootstrap current of the jphi-split-bootstrap model (@ref grad_shaf_bootstrap::bootstrap_eval) on the
 !! current equilibrium at given nodes and kinetic profiles, without changing the equilibrium or any
 !! bootstrap solve state. A node at the LCFS (psi_in = 0) is not used: its current is extrapolated as
-!! in the solve, and its f_t and nu* are left at zero.
+!! in the solve, and its f_t, nu* and geometry are left at zero.
 !---------------------------------------------------------------------------------
 SUBROUTINE tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model, &
-    imp_mode,bs_model,ion_charge_model,profs,error_str) BIND(C,NAME="tokamaker_eval_bootstrap")
+    imp_mode,bs_model,ion_charge_model,profs,geom,error_str) BIND(C,NAME="tokamaker_eval_bootstrap")
 TYPE(c_ptr), VALUE, INTENT(in) :: tMaker_equil_ptr !< Pointer to TokaMaker equilibrium object
 INTEGER(c_int), VALUE, INTENT(in) :: npsi !< Number of nodes
 REAL(c_double), INTENT(in) :: psi_in(npsi) !< Normalized \f$ \psi \f$ of the nodes (0 at the LCFS, 1 at the axis), increasing
@@ -816,6 +816,8 @@ INTEGER(c_int), VALUE, INTENT(in) :: imp_mode !< Impurity in the ion pressure: 0
 INTEGER(c_int), VALUE, INTENT(in) :: bs_model !< Bootstrap coefficients: 1 Redl 2021, 2 Sauter 1999
 INTEGER(c_int), VALUE, INTENT(in) :: ion_charge_model !< Ion charge in nu_i*, ln Lambda_ii: 1 Koh form, 2 main-ion charge
 REAL(c_double), INTENT(out) :: profs(npsi,6) !< <j_BS.B> [T A/m^2], field-aligned and pressure-driven jphi [A/m^2], f_t, nu_e*, nu_i*
+REAL(c_double), INTENT(out) :: geom(npsi,8) !< Geometry of the evaluation's flux-surface pass: eps, (R_max+R_min)/2 [m], q,
+!! <R> [m], <1/R> [1/m], <1/R^2> [1/m^2], <|B|> [T], <|B|^2> [T^2]
 CHARACTER(KIND=c_char), INTENT(out) :: error_str(OFT_ERROR_SLEN) !< Error string (empty if no error)
 INTEGER(i4) :: i0,n,ierr
 REAL(r8), ALLOCATABLE :: te_ev(:),ti_ev(:),nz(:),jdotB(:),jphi_bs(:),jphi_pd(:)
@@ -838,6 +840,7 @@ IF((ion_charge_model<1).OR.(ion_charge_model>2))THEN
   RETURN
 END IF
 profs=0.d0
+geom=0.d0
 i0=MERGE(2,1,psi_in(1)==0.d0) ! The LCFS is not a node
 n=npsi-i0+1
 ALLOCATE(te_ev(n),ti_ev(n),nz(n),jdotB(0:n),jphi_bs(0:n),jphi_pd(0:n))
@@ -851,11 +854,11 @@ IF(imp_mode==1)CALL imp_density(n,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi),nz)
 IF(imp_mode==0)THEN
   CALL bootstrap_eval(tMaker_equil_obj,n,psi_in(i0:npsi),te_ev,ti_ev,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi), &
     tMaker_equil_obj%p_scale,ln_lambda_model,bs_model,ion_charge_model,jdotB,jphi_bs,jphi_pd,ierr, &
-    ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6))
+    ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6),geo_out=geom(i0:npsi,:))
 ELSE
   CALL bootstrap_eval(tMaker_equil_obj,n,psi_in(i0:npsi),te_ev,ti_ev,ne(i0:npsi),ni(i0:npsi),zeff(i0:npsi), &
     tMaker_equil_obj%p_scale,ln_lambda_model,bs_model,ion_charge_model,jdotB,jphi_bs,jphi_pd,ierr,nimp=nz, &
-    ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6))
+    ft_out=profs(i0:npsi,4),nu_out=profs(i0:npsi,5:6),geo_out=geom(i0:npsi,:))
 END IF
 IF(ierr/=0)THEN
   CALL copy_string('Bootstrap evaluation failed (see warning)',error_str)

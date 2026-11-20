@@ -141,9 +141,9 @@ tokamaker_saw_reset_1d = ctypes_subroutine(oftpy_lib.tokamaker_saw_reset_1d,
      ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1), ctypes_numpy_array(numpy.float64,1),
      ctypes_numpy_array(numpy.float64,1), c_int_ptr])
 
-# tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model,imp_mode,bs_model,ion_charge_model,profs,error_str)
+# tokamaker_eval_bootstrap(tMaker_equil_ptr,npsi,psi_in,te,ti,ne,ni,zeff,nimp,ln_lambda_model,imp_mode,bs_model,ion_charge_model,profs,geom,error_str)
 tokamaker_eval_bootstrap = ctypes_subroutine(oftpy_lib.tokamaker_eval_bootstrap,
-    [c_void_p, c_int] + [ctypes_numpy_array(numpy.float64,1)]*7 + [c_int, c_int, c_int, c_int, ctypes_numpy_array(numpy.float64,2), c_char_p])
+    [c_void_p, c_int] + [ctypes_numpy_array(numpy.float64,1)]*7 + [c_int, c_int, c_int, c_int] + [ctypes_numpy_array(numpy.float64,2)]*2 + [c_char_p])
 
 # tokamaker_init_psi(tMaker_ptr,r0,z0,a,kappa,delta,rhs_source,error_str)
 tokamaker_init_psi = ctypes_subroutine(oftpy_lib.tokamaker_init_psi,

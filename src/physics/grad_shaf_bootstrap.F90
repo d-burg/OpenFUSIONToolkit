@@ -1786,7 +1786,7 @@ END SUBROUTINE imp_density
 !! Neither `gseq` nor any bootstrap profile state is changed.
 !------------------------------------------------------------------------------
 SUBROUTINE bootstrap_eval(gseq, n_psi, psi_N, Te, Ti, ne, ni, Zeff, pscale, ln_lambda_model, bs_model, &
-  ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, nimp, ravgs, qa, ft_out, nu_out, diagnose)
+  ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, nimp, ravgs, qa, ft_out, nu_out, geo_out, diagnose)
 CLASS(gs_equil), INTENT(inout) :: gseq !< Equilibrium object (not changed)
 INTEGER(i4), INTENT(in) :: n_psi !< Number of nodes
 REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi (OFT convention, 0=LCFS), strictly increasing, psi_N(1)>0
@@ -1808,6 +1808,8 @@ REAL(r8), OPTIONAL, INTENT(out) :: ravgs(n_psi,3) !< <R>, <1/R>, <1/R^2> on psi_
 REAL(r8), OPTIONAL, INTENT(out) :: qa(n_psi,2) !< q and dA/dpsi_N on psi_N from the Sauter contour pass (see @ref sauter_fc)
 REAL(r8), OPTIONAL, INTENT(out) :: ft_out(n_psi) !< Trapped particle fraction
 REAL(r8), OPTIONAL, INTENT(out) :: nu_out(n_psi,2) !< Collisionalities nu_e*, nu_i*
+REAL(r8), OPTIONAL, INTENT(out) :: geo_out(n_psi,8) !< Geometry of the Sauter pass (as @ref sauter_fc returns it):
+!! eps, (R_max+R_min)/2, q, <R>, <1/R>, <1/R^2>, <|B|>, <|B|^2>
 LOGICAL, OPTIONAL, INTENT(in) :: diagnose !< Print a sample of the geometry and collisionality
 !---
 INTEGER(i4) :: i
@@ -1919,6 +1921,7 @@ IF(ierr == 0)CALL finish(jdotB)
 IF(ierr /= 0)RETURN
 IF(PRESENT(ft_out))ft_out = ft
 IF(PRESENT(nu_out))nu_out = RESHAPE([nu_e_star, nu_i_star], [n_psi,2])
+IF(PRESENT(geo_out))geo_out = RESHAPE([eps, R_geo, qvals, r_avgs_saut(:,1:2), invr2, modb_avgs_saut], [n_psi,8])
 IF(.NOT.PRESENT(diagnose))RETURN
 IF(diagnose)THEN
   WRITE(*,'(A)') '  [bootstrap_eval] geometry & collisionality sample (i=1,mid,n):'

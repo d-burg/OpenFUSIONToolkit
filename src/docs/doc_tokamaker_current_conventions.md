@@ -119,7 +119,10 @@ At each nonlinear iteration `solve_bootstrap` evaluates the Redl et al. (2021) f
 by default \f$ \nu_{i*} \f$ the charge factor \f$ Z^4 = (n_e/n_i) Z_{eff} \f$ (`ion_charge_model` below). The kinetic gradients are taken on the nodes without the
 LCFS, and the values on the LCFS (and on the axis) are extrapolated. `eval_bootstrap` runs the same code on the
 current equilibrium at given surfaces and kinetic profiles, without solving and without changing the equilibrium,
-and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$. Four options
+and returns `jdotB_bs_raw`, `jphi_bs_raw`, `jphi_pd_raw`, \f$ f_t \f$, \f$ \nu_{e*} \f$ and \f$ \nu_{i*} \f$, and the
+geometry of its flux-surface pass (\f$ \epsilon \f$, \f$ (R_{max}+R_{min})/2 \f$, \f$ q \f$, \f$ \langle R \rangle \f$,
+\f$ \langle 1/R \rangle \f$, \f$ \langle 1/R^2 \rangle \f$, \f$ \langle |B| \rangle \f$, \f$ \langle |B|^2 \rangle \f$), equal to
+what `calc_sauter_fc` returns on the same surfaces, so a caller that needs both makes one pass. Four options
 (`set_boot_ops`, `solve_bootstrap`, `eval_bootstrap`) act on both:
 - `bs_model`: the fits of the four coefficients \f$ L_{31} \f$, \f$ L_{32} \f$, \f$ L_{34} \f$ and \f$ \alpha \f$; everything
   else (collisionalities, Coulomb logarithms, geometry, the `jboot1` assembly, the conversion to \f$ j_\phi \f$) is

@@ -122,6 +122,10 @@ def create_prof_file(self, filename, profile_dict, name):
 
 
 ## Bootstrap options and their defaults (as in the Fortran `boot_ops` type); value types set the conversions
+## Geometry keys of @ref TokaMaker.TokaMaker_equilibrium.eval_bootstrap "eval_bootstrap", in the order of the
+## wrapper's `geom` rows
+_EVAL_BOOT_GEOM_KEYS = ('eps', 'R_geo', 'q', '<R>', '<1/R>', '<1/R^2>', '<|B|>', '<|B|^2>')
+
 _BOOT_OPS_DEFAULTS = {
     'isolate_edge_jbs': False,
     'scale_jbs': 1.0,
@@ -3438,7 +3442,12 @@ class TokaMaker_equilibrium():
         @result Dictionary of 1-D numpy arrays on `psi`: `'psi_n'`; `'jdotB_bs_raw'`, `'jphi_bs_raw'` and
           `'jphi_pd_raw'` as in @ref get_boot_profs; `'f_t'` (trapped fraction), `'nu_e_star'` and `'nu_i_star'`
           (collisionalities), which are NaN on the LCFS (not evaluated) and, on an axis node, their limits
-          \f$f_t = 0\f$ and \f$\nu_* = \infty\f$
+          \f$f_t = 0\f$ and \f$\nu_* = \infty\f$; and the geometry of the evaluation's flux-surface pass, the one
+          @ref TokaMaker.TokaMaker_equilibrium.calc_sauter_fc "calc_sauter_fc" makes on the same points (its values,
+          so a separate call is not needed): `'eps'` (inverse aspect ratio
+          \f$(R_{\max}-R_{\min})/(R_{\max}+R_{\min})\f$), `'R_geo'` (\f$(R_{\max}+R_{\min})/2\f$ [m]), `'q'` (signed as
+          by @ref TokaMaker.TokaMaker_equilibrium.get_q "get_q"), `'<R>'`, `'<1/R>'`, `'<1/R^2>'`, `'<|B|>'`,
+          `'<|B|^2>'`, also NaN on the LCFS and, on an axis node, the pass's limits (q of the next surface)
         '''
         psi = numpy.asarray(psi, dtype=numpy.float64)
         if (psi.ndim != 1) or (psi.size < 4) or (not numpy.all(numpy.isfinite(psi))) \
@@ -3480,16 +3489,20 @@ class TokaMaker_equilibrium():
                                  f" on the LCFS); its minimum there is {vals.min():.6g}")
         profs = [profs[name] for name in ('te', 'ti', 'ne', 'ni', 'Zeff', 'nimp')]
         out = numpy.zeros((6, n), dtype=numpy.float64)
+        geom = numpy.zeros((8, n), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_eval_bootstrap(self.c_ptr, n, psi_c, *profs, int(ln_lambda_model), imp_mode, int(bs_model),
-                                 int(ion_charge_model), out, error_string)
+                                 int(ion_charge_model), out, geom, error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
         if psi_c[0] == 0.0:
             out[3:, 0] = numpy.nan # Not evaluated on the LCFS
+            geom[:, 0] = numpy.nan
         result = {'psi_n': psi.copy()}
         for k, key in enumerate(('jdotB_bs_raw', 'jphi_bs_raw', 'jphi_pd_raw', 'f_t', 'nu_e_star', 'nu_i_star')):
             result[key] = out[k, flip].copy()
+        for k, key in enumerate(_EVAL_BOOT_GEOM_KEYS):
+            result[key] = geom[k, flip].copy()
         return result
 
     def set_resistivity(self, eta_prof=None):

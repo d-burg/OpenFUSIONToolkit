@@ -233,7 +233,7 @@ def measurements_from_imas(ids, time, time_window, machine="", groups=None,
     ids : dict
         Top-level dict keyed by IDS name (``magnetics``, ``pf_active``, ...).
     time, time_window : float
-        Window centre and full width [s].
+        Window center and full width [s].
     groups : sequence, optional
         Groups to build (default: every group in :data:`ALL_GROUPS` whose
         source is present).  A requested group whose source is absent raises.

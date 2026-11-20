@@ -61,6 +61,17 @@ def run_shell_command(command, timeout=10, env_vars=None):
 ## @cond
 _NML_INT = re.compile(r"[+-]?\d+")
 _NML_REAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+# Quoted strings (a doubled quote stands for one quote; no line breaks), and the same or a comment
+_NML_STRING = r"'(?:[^'\n]|'')*'|\"(?:[^\"\n]|\"\")*\""
+_NML_STRING_OR_COMMENT = re.compile(_NML_STRING + r"|!.*")
+_NML_STRING_OR_COMMA = re.compile("(" + _NML_STRING + ")|,")
+# Value tokens: a quoted string, a separator, or a bare token
+_NML_TOKEN = re.compile(_NML_STRING + r"|,|[^\s,]+")
+# Assignment target NAME or NAME(subscripts), not preceded by part of a value
+_NML_KEY = re.compile(r"(?<![\w.'\"])([A-Za-z_]\w*(?:\s*\([^()=]*\))?)\s*=")
+# Group start (&NAME, $NAME) and group end (/, &END, $END, or a bare & or $)
+_NML_START = re.compile(r"[&$](?!END\b)([A-Za-z_]\w*)", re.IGNORECASE)
+_NML_END = re.compile(r"/|[&$]END\b|[&$](?![A-Za-z_])", re.IGNORECASE)
 ## @endcond
 
 
@@ -80,231 +91,264 @@ def _namelist_scalar(token):
     raise ValueError("Not a namelist literal: {0}".format(token))
 
 
+def _namelist_number(token):
+    r'''! Real value of one entry of a namelist array, or `None` when it is not a number
+
+    @param token Token text
+    @result `float` or `None`
+    '''
+    if _NML_REAL.fullmatch(token):
+        return float(token)
+    if token[0] in "'\"":
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _namelist_value(text, as_array=False):
+    r'''! Value of one namelist assignment
+
+    Numbers give an `int` or `float` for one value and a `float` array for several values or an `r*v` repeat;
+    any other content gives the value text with separators turned into spaces (a single token is unquoted).
+
+    @param text Text after the `=` up to the next assignment or the end of the group, without comments
+    @param as_array Return numbers as an array even for a single value
+    @result Value
+    '''
+    entries = []
+    repeated = False
+    for token in _NML_TOKEN.findall(text):
+        if token == ',':
+            continue
+        count, star, value = token.partition('*')
+        if star and _NML_INT.fullmatch(count):
+            entries.extend(int(count)*[value] if value else [])
+            repeated = True
+        else:
+            entries.append(token)
+    numbers = [_namelist_number(entry) for entry in entries]
+    if entries and all(number is not None for number in numbers):
+        if as_array or repeated or len(entries) > 1:
+            return numpy.array(numbers, dtype=float)
+        try:
+            return _namelist_scalar(entries[0])
+        except ValueError:
+            pass
+    elif not entries and as_array:
+        return numpy.zeros((0,))
+    # Not numbers: the text, with commas outside quoted strings and double quotes removed
+    lines = [line.strip() for line in text.splitlines()]
+    text = ' '.join([line for line in lines if line != ''])
+    text = _NML_STRING_OR_COMMA.sub(lambda m: m.group(1) if m.group(1) else ' ', text)
+    text = text.replace('"', '').strip()
+    if '*' in text:
+        parts = text.split()
+        for i, part in enumerate(parts):
+            if '*' in part:
+                count = part.split('*')
+                if _NML_INT.fullmatch(count[0]):
+                    parts[i] = ' '.join(int(count[0])*[count[1]])
+        return ' '.join(parts)
+    parts = text.split()
+    if len(parts) == 1 and not as_array:
+        try:
+            return _namelist_scalar(parts[0])
+        except ValueError:
+            pass
+    return text
+
+
+def _namelist_bottom_array(rows, data_dict, nml_keys):
+    r'''! Read the coil and vessel table that follows the namelist in older machine files (`b_arr=True`)
+
+    @param rows Table lines (without line breaks, commas or comments)
+    @param data_dict Namelist values; the table (`b_arr`) and coil/vessel arrays derived from it are added
+    @param nml_keys Keys read from the namelist itself
+    '''
+    b_arr_len = len(rows)
+    data_dict['b_arr'] = numpy.zeros((b_arr_len,6))
+
+    for j in range(b_arr_len):
+        try:
+            b_line = numpy.array(re.split(r'(\s+)', rows[j]))
+            b_line_space_idx = []
+            b_line_rmv_idx = []
+
+            for k in range(len(b_line)):
+                if b_line[k].isspace():
+                    b_line_space_idx.append(k)
+
+            b_line_space_len = (lambda x:[len(k) for k in x])(b_line[b_line_space_idx])
+
+            for k in range(len(b_line_space_idx)):
+                if b_line_space_len[k] < 10: #== min(b_line_space_len):
+                    b_line_rmv_idx.append(b_line_space_idx[k])
+                else:
+                    b_line[b_line_space_idx[k]] = 0.0
+
+            b_line = numpy.delete(b_line, b_line_rmv_idx)
+
+            data_dict['b_arr'][j][0:len(b_line)] = b_line
+
+        except:
+            data_dict['b_arr'][j][:] = numpy.nan
+
+    if 'RF' not in nml_keys:
+        try:
+            data_dict['RF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),0]
+            data_dict['ZF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),1]
+            data_dict['WF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),2]
+            data_dict['HF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),3]
+            data_dict['AF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),4]
+            data_dict['AF2'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),5]
+
+        except:
+            print('Error in determining F-coil data')
+
+    if 'RVS' not in nml_keys:
+        try:
+            VS_idx_start = len(data_dict['b_arr'])-len(data_dict['RSISVS']) #len(data_dict['TURNFC'])
+            VS_idx_end = len(data_dict['b_arr'])#len(data_dict['RSISVS'])+VS_idx_start
+
+            data_dict['RVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,0]
+            data_dict['ZVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,1]
+            data_dict['WVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,2]
+            data_dict['HVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,3]
+            data_dict['AVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,4]
+            data_dict['AVS2'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,5]
+
+            RVS_in_barr = True
+
+        except:
+            RVS_in_barr = False
+            print('Error in determining vacuum vessel data')
+
+    if 'RE' not in nml_keys:
+        if data_dict['IECOIL'] == 1:
+            try:
+                if 'RF' in data_dict.keys():
+                    EC_idx_start = len(data_dict['TURNFC'])
+                else:
+                    EC_idx_start = 0
+
+                if RVS_in_barr:
+                    EC_idx_end = VS_idx_start
+                else:
+                    EC_idx_end = len(data_dict['b_arr'])
+
+                data_dict['RE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,0]
+                data_dict['ZE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,1]
+                data_dict['WE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,2]
+                data_dict['HE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,3]
+                data_dict['ECID'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,4]
+
+            except:
+                print('Error in determining E-coil data')
+
+
 def read_fortran_namelist(file0, silent=True, b_arr=False):
-	r'''Return a dictionary with the parameters in the namelist file (file0)
+    r'''Return a dictionary with the parameters in the namelist file (file0)
 
-	@param file0 File to read from
-	@param silent If false, print dictionary entries after reading
-	@param b_arr Refers to an array at the bottom of the file, if one exists
-	@result Dictionary containing data from file0.
-	'''
+    All groups (`&NAME ... /`, also ended by `&END` or `$END`) are merged into one dictionary, keyed by the
+    names as written (case is kept). A name assigned again in the same group takes the later value, as in
+    Fortran; a name already read from an earlier group keeps the earlier group's value. Several assignments
+    may share a line; text outside the groups and comments (`!` outside quoted strings) are ignored, and a
+    line containing `comment:` ends the input. A file without group headers is read as one group.
 
-	f_lines = None
-	with open(str(file0), 'r') as f:
-		f_lines = f.readlines()
+    @param file0 File to read from
+    @param silent If false, print dictionary entries after reading
+    @param b_arr Refers to an array at the bottom of the file, if one exists
+    @result Dictionary containing data from file0.
+    '''
+    with open(str(file0), 'r') as f:
+        f_lines = f.readlines()
 
-	datalines = [] #Initialize new dictionary of information
+    # The coil and vessel table, when requested, follows the namelist terminator closest to the last assignment
+    table_start = len(f_lines)
+    if b_arr:
+        brk_idx = [i for i, line in enumerate(f_lines) if line.find('/') >= 0]
+        equal_idx = [i for i, line in enumerate(f_lines) if line.find('=') >= 0]
+        table_start = brk_idx[numpy.argmin(abs(numpy.array(brk_idx)-numpy.max(equal_idx)))]
 
-	if b_arr:
-		brk_idx = [] #Find the last break and turn it into the bottom array
-		equal_idx = [] #Find the last equals sign
+    # Input ends at the last line containing "comment:"
+    end_idx = len(f_lines)
+    for i, line in enumerate(f_lines):
+        if line.find('comment:') >= 0:
+            end_idx = i
 
-		for i in range(len(f_lines)):
-			brk_loc = f_lines[i].find('/')  #Find the lines with backslashes (line breaks)
-			if brk_loc >= 0.0:
-				brk_idx.append(i)
+    # Blank out comments; `masked` also blanks quoted strings, leaving only namelist syntax
+    text = ''.join(f_lines[:min(table_start, end_idx)])
+    clean = []
+    masked = []
+    pos = 0
+    for m in _NML_STRING_OR_COMMENT.finditer(text):
+        clean.append(text[pos:m.start()])
+        masked.append(text[pos:m.start()])
+        if m.group(0).startswith('!'):
+            clean.append(' '*len(m.group(0)))
+            masked.append(' '*len(m.group(0)))
+        else:
+            clean.append(m.group(0))
+            masked.append('\0'*len(m.group(0)))
+        pos = m.end()
+    clean = ''.join(clean) + text[pos:]
+    masked = ''.join(masked) + text[pos:]
 
-			equal_loc = f_lines[i].find('=')
-			if equal_loc >= 0.0:
-				equal_idx.append(i)
+    # Group bodies as (start, end) offsets
+    groups = []
+    m = _NML_START.search(masked)
+    while m is not None:
+        end = len(masked)
+        stop = _NML_END.search(masked, m.end())
+        if stop is not None:
+            end = stop.start()
+        m_next = _NML_START.search(masked, m.end())
+        if m_next is not None and m_next.start() < end:
+            end = m_next.start()
+        groups.append((m.end(), end))
+        m = _NML_START.search(masked, end)
+    if len(groups) == 0:
+        start = 0
+        for stop in _NML_END.finditer(masked):
+            groups.append((start, stop.start()))
+            start = stop.end()
+        groups.append((start, len(masked)))
 
-		f_lines[brk_idx[numpy.argmin(abs(brk_idx-numpy.max(equal_idx)))]] = 'b_arr = '
+    # Assignments in file order: (group, name, value text)
+    assignments = []
+    for igroup, (start, end) in enumerate(groups):
+        keys = list(_NML_KEY.finditer(masked, start, end))
+        for i, key in enumerate(keys):
+            value_end = end
+            if i < len(keys)-1:
+                value_end = keys[i+1].start()
+            assignments.append((igroup, key.group(1).strip(), clean[key.end():value_end]))
 
-	#Prune everything after the comments and remove line breaks
-	end_idx = len(f_lines)
+    data_dict = OrderedDict()
+    key_group = {}
+    for i, (igroup, key, value_text) in enumerate(assignments):
+        if key in key_group and key_group[key] != igroup:
+            continue
+        # The last assignment of the file is always returned as an array (former behavior)
+        as_array = (i == len(assignments)-1) and (not b_arr)
+        data_dict[key] = _namelist_value(value_text, as_array)
+        key_group[key] = igroup
 
-	for i in range(len(f_lines)):
-		line = f_lines[i]
+    if b_arr:
+        rows = []
+        for line in f_lines[table_start+1:end_idx]:
+            line = line.replace('\n', '').replace(',', ' ').replace('"', '')
+            if (line.find('&') >= 0) or (line.find('/') >= 0):
+                continue
+            line = line.split('!')[0].strip()
+            if line != '':
+                rows.append(line)
+        _namelist_bottom_array(rows, data_dict, list(data_dict.keys()))
 
-		if line.find('comment:') >= 0: #Find the comment at the end (if it exists and make this the end of the file)
-			end_idx = i
+    if not silent:
+        for key in data_dict:
+            print(key, data_dict[key])
 
-		line_update = line.replace('\n','')  #Remove line breaks
-		line_update = line_update.replace(',',' ')   #Remove commas
-		line_update = line_update.replace('"', '')  #Remove comment/quotation marks
-		comment_loc = line_update.find('!')  #Find the comment
-		brk_loc = line_update.find('/')  #Find the lines with backslashes (line breaks)
-		headr_loc = line_update.find('&') #and list headers (& symbols)
-
-		if i < end_idx: #Only include lines before the end comment
-			if headr_loc < 0: #Remove hardcoded linebreaks and list headers
-				if brk_loc < 0:
-					if comment_loc < 0:  #If there are no comments in the line (-1)
-						if line_update.strip() != '':
-							datalines.append(line_update.strip())
-					elif comment_loc >= 0:
-						#ignore everything after the comment and get rid of white space (strip)
-						line_update = line_update[:comment_loc].strip()
-						if line_update != '':
-							datalines.append(line_update)
-
-
-	data_dict = OrderedDict()
-	block_idx = []
-
-	for i in range(len(datalines)):
-		equal_loc = datalines[i].find('=')  #Find where the equal sign is in the array
-		if equal_loc > 0:
-			block_idx.append(i)
-			key0 = datalines[i][:equal_loc].strip()
-			data_dict[key0] = 0.0
-
-	key_list = list(data_dict.keys())
-
-
-	for i in range(len(key_list)):
-		if key_list[i] != 'b_arr':
-			#Concetenate each of the blocks (arrays that span multiple lines) of data
-			if i < len(key_list)-1:
-				mult_block = ' '.join(datalines[block_idx[i]:block_idx[i+1]])
-				equal_loc = mult_block.find('=')
-				mult_block = mult_block[equal_loc+1:].strip()
-				#data_dict[key_list[i]] = numpy.array(mult_block.split(' '))#.astype('float')
-				dupl_loc = mult_block.find('*')
-				if dupl_loc >= 0:
-					mult_block = mult_block.split()
-					star_idx = [idx for idx, s in enumerate(mult_block) if '*' in s]
-
-					for j in range(len(star_idx)):
-						dupl_str = mult_block[star_idx[j]].split('*')
-						try:
-							dupl_arr = ' '.join(int(dupl_str[0])*[dupl_str[1]])
-						except:
-							continue
-						mult_block[star_idx[j]] = dupl_arr
-
-					mult_block = ' '.join(mult_block)
-
-					try:
-						data_dict[key_list[i]] = numpy.array(mult_block.split()).astype('float')
-
-					except:
-						data_dict[key_list[i]] = mult_block
-				else:
-					try:
-						if len(mult_block.split()) > 1:  #If longer than one entry, make it an array
-							data_dict[key_list[i]] = numpy.array(mult_block.split()).astype('float')
-						else:    #if it is one entry, make it a float or an integer
-							data_dict[key_list[i]] = _namelist_scalar(mult_block.split()[0])
-
-					except:
-						data_dict[key_list[i]] = mult_block
-
-			#Try the same process for the last entry
-			else:
-				mult_block = ' '.join(datalines[block_idx[i]:len(datalines)])  #On the last block, go to the end of the file
-				equal_loc = mult_block.find('=')
-				mult_block = mult_block[equal_loc+1:].strip()
-				dupl_loc = mult_block.find('*')
-				if dupl_loc >= 0:
-					mult_block = mult_block.split()
-					star_idx = [idx for idx, s in enumerate(mult_block) if '*' in s]
-
-					for j in range(len(star_idx)):
-						dupl_str = mult_block[star_idx[j]].split('*')
-						try:
-							dupl_arr = ' '.join(int(dupl_str[0])*[dupl_str[1]])
-						except:
-							continue
-						mult_block[star_idx[j]] = dupl_arr
-
-					mult_block = ' '.join(mult_block)
-					try:
-						data_dict[key_list[i]] = numpy.array(mult_block.split()).astype('float')
-					except:
-						data_dict[key_list[i]] = mult_block
-				else:
-					try:
-						data_dict[key_list[i]] = numpy.array(mult_block.split()).astype('float')
-					except:
-						data_dict[key_list[i]] = mult_block
-
-		elif key_list[i] == 'b_arr':
-			b_arr_len = len(datalines[block_idx[i]+1:len(datalines)])
-			data_dict['b_arr'] = numpy.zeros((b_arr_len,6))
-
-			for j in range(b_arr_len):
-				try:
-					b_line = numpy.array(re.split(r'(\s+)', datalines[block_idx[i]+1+j]))
-					b_line_space_idx = []
-					b_line_rmv_idx = []
-
-					for k in range(len(b_line)):
-						if b_line[k].isspace():
-							b_line_space_idx.append(k)
-
-					b_line_space_len = (lambda x:[len(k) for k in x])(b_line[b_line_space_idx])
-
-					for k in range(len(b_line_space_idx)):
-						if b_line_space_len[k] < 10: #== min(b_line_space_len):
-							b_line_rmv_idx.append(b_line_space_idx[k])
-						else:
-							b_line[b_line_space_idx[k]] = 0.0
-
-					b_line = numpy.delete(b_line, b_line_rmv_idx)
-
-					#b_line = numpy.array(datalines[block_idx[i]+1+j].split()).astype('float')
-					data_dict['b_arr'][j][0:len(b_line)] = b_line
-
-
-				except:
-					data_dict['b_arr'][j][:] = numpy.nan
-
-			if 'RF' not in key_list:
-				try:
-					data_dict['RF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),0]
-					data_dict['ZF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),1]
-					data_dict['WF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),2]
-					data_dict['HF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),3]
-					data_dict['AF'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),4]
-					data_dict['AF2'] = data_dict['b_arr'][0:len(data_dict['TURNFC']),5]
-
-				except:
-					print('Error in determining F-coil data')
-
-			if 'RVS' not in key_list:
-				try:
-					VS_idx_start = len(data_dict['b_arr'])-len(data_dict['RSISVS']) #len(data_dict['TURNFC'])
-					VS_idx_end = len(data_dict['b_arr'])#len(data_dict['RSISVS'])+VS_idx_start
-
-					data_dict['RVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,0]
-					data_dict['ZVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,1]
-					data_dict['WVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,2]
-					data_dict['HVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,3]
-					data_dict['AVS'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,4]
-					data_dict['AVS2'] = data_dict['b_arr'][VS_idx_start:VS_idx_end,5]
-
-					RVS_in_barr = True
-
-				except:
-					RVS_in_barr = False
-					print('Error in determining vacuum vessel data')
-
-			if 'RE' not in key_list:
-				if data_dict['IECOIL'] == 1:
-					try:
-						if 'RF' in data_dict.keys():
-							EC_idx_start = len(data_dict['TURNFC'])
-						else:
-							EC_idx_start = 0
-
-						if RVS_in_barr:
-							EC_idx_end = VS_idx_start
-						else:
-							EC_idx_end = len(data_dict['b_arr'])
-
-						data_dict['RE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,0]
-						data_dict['ZE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,1]
-						data_dict['WE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,2]
-						data_dict['HE'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,3]
-						data_dict['ECID'] = data_dict['b_arr'][EC_idx_start:EC_idx_end,4]
-
-					except:
-						print('Error in determining E-coil data')
-
-
-	if not silent:
-		for key in data_dict:
-			print(key, data_dict[key])
-
-	return data_dict
+    return data_dict

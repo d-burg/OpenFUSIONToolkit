@@ -21,6 +21,7 @@ class tokamaker_settings_cstruct(c_struct):
                 ("maxits", c_int),
                 ("mode", c_int),
                 ("trace_type", c_int),
+                ("lcfs_rule", c_int),
                 ("urf", c_double),
                 ("nl_tol", c_double),
                 ("rmin", c_double),

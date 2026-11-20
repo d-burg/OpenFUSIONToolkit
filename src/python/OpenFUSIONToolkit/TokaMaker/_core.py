@@ -230,6 +230,10 @@ class tokamaker_settings:
         self.mode = 1
         ## Field-line tracer for flux surfaces not handled by the contour method (1 -> LSODE, 3 -> Runge-Kutta with steps limited at cell boundaries)
         self.trace_type = 3
+        ## Rule for the plasma source and the plasma integrals in cells crossed by the LCFS (1 -> cut-cell quadrature:
+        ## integrate over the part of each cell inside the LCFS, continuous in \f$ \psi \f$; 0 -> test each
+        ## quadrature point, the rule before cut cells)
+        self.lcfs_rule = 1
         ## Under-relaxation factor for NL fixed-point iteration
         self.urf = 0.2
         ## Convergence tolerance for NL solver
@@ -263,6 +267,8 @@ class tokamaker_settings:
             raise ValueError("If `opoint_target_weight` is positive, both `ffp_target_weight` and `pp_target_weight` must be positive as well (soft constraint)")
         if self.trace_type not in (1, 3):
             raise ValueError("`trace_type` must be 1 (LSODE) or 3 (Runge-Kutta)")
+        if isinstance(self.lcfs_rule, bool) or (self.lcfs_rule not in (0, 1)):
+            raise ValueError("`lcfs_rule` must be 0 (point test) or 1 (cut-cell quadrature)")
         c_struct_instance = tokamaker_settings_cstruct()
         c_struct_instance.pm = self.pm
         c_struct_instance.free_boundary = self.free_boundary
@@ -272,6 +278,7 @@ class tokamaker_settings:
         c_struct_instance.maxits = self.maxits
         c_struct_instance.mode = self.mode
         c_struct_instance.trace_type = self.trace_type
+        c_struct_instance.lcfs_rule = self.lcfs_rule
         c_struct_instance.urf = self.urf
         c_struct_instance.nl_tol = self.nl_tol
         c_struct_instance.rmin = self.rmin

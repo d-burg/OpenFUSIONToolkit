@@ -9,7 +9,7 @@
 import numpy as np
 import pytest
 
-from OpenFUSIONToolkit.TokaMaker.sources import IonSpecies, NeutralBeam, SimpleBeamModel, classical_moments
+from OpenFUSIONToolkit.TokaMaker.sources import BeamOptics, IonSpecies, NeutralBeam, SimpleBeamModel, classical_moments
 from OpenFUSIONToolkit.TokaMaker.sources import beam as bm
 from OpenFUSIONToolkit.TokaMaker.sources import slowing_down as sd
 from OpenFUSIONToolkit.TokaMaker.sources.conventions import E_CHARGE, M_AMU, M_PROTON
@@ -84,6 +84,40 @@ def test_particle_conservation_and_pitch():
         # xi0 = R_t / R at birth: bounded by R_t/(R0+a) and 1, and largest where R ~ R_t
         live = dep.births[0] > 1e-3 * dep.births[0].max()
         assert np.all(dep.xi0[0][live] >= 1.2 / (R0 + A) - 1e-9) and np.all(dep.xi0[0][live] <= 1 + 1e-12)
+
+
+@pytest.mark.parametrize("side", [-1.0, 1.0])
+def test_vertical_angle_is_positive_upward(side):
+    """A beam launched from below (above) the midplane with a positive (negative) vertical angle reaches the axis.
+
+    Geometry: the source is at height Z_s = side * h with h = 1.0 m (outside the plasma, |Z| <= a = 0.6 m), and the
+    tangency radius is R_t = R0, so the horizontal projection of the beam touches the circle R = R0 after a
+    horizontal distance sqrt(R_s^2 - R_t^2).  With the documented convention (positive angle = upward) the angle
+    theta = -side * atan(h / sqrt(R_s^2 - R_t^2)) brings the beam to Z = Z_s + sqrt(R_s^2 - R_t^2) tan(theta) = 0
+    exactly there, i.e. through the magnetic axis (R0, 0).  The opposite sign moves it away from the midplane, where
+    it never meets the plasma (|Z| >= h > a everywhere along the path).
+    Bounds: the path is sampled every ds = L / (n_steps - 1); the sample nearest the axis is within ds / 2 of it, so
+    its rho is below ds / (2 a) (checked against ds / a), and its height within (ds / 2) |sin theta| of zero (checked
+    against ds |sin theta|).  The single-beamlet route (point source, no divergence) shares the frame and is held to
+    the same closest approach.
+    """
+    ne, te, ions, _ = _plasma()
+    hyd, imp = [(ions[0].n, 1.0)], [(ions[1].n, 6.0)]
+    h, Rs = 1.0, 5.0
+    th = -side * np.arctan(h / np.sqrt(Rs ** 2 - R0 ** 2))
+    b = _beam(tangency_radius=R0, source_r=Rs, source_z=side * h, vertical_angle=th)
+    dep = bm.pencil_beam_deposition(b, rho_of_rz, RHO, DV, ne, te, hyd, imp)
+    rr, s = dep.path["rho"], dep.path["s"]
+    ds = s[1] - s[0]
+    assert np.any(np.isfinite(rr)), "the beam never enters the plasma"
+    assert np.nanmin(rr) < ds / A
+    i = np.argmin(dep.path["R"])                     # tangency point of the horizontal projection
+    assert abs(dep.path["Z"][i]) < ds * abs(np.sin(th))
+    assert np.all(dep.shine_through < 1.0) and np.all(dep.births[:, 0] > 0)
+    point = BeamOptics(width_h=0.0, width_v=0.0, focal_h=None, focal_v=None, divergence=())
+    q = bm.beamlet_deposition(b, point, rho_of_rz, RHO, DV, ne, te, hyd, imp, n_beamlets=1)
+    assert q.info["rho_closest_approach"]["min"] is not None
+    assert q.info["rho_closest_approach"]["min"] < ds / A
 
 
 def test_model_energy_conservation_and_outputs():

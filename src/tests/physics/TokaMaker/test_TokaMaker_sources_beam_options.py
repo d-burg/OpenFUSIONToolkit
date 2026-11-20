@@ -7,6 +7,8 @@
 # Synthetic circular geometry and synthetic beam optics only (round numbers, no device description).  The defaults
 # (pencil deposition, no trapping) are checked against values pinned before the options existed, and against an
 # explicit-default construction bit for bit.  Pure Python.
+import math
+
 import numpy as np
 import pytest
 from scipy.integrate import quad
@@ -232,6 +234,39 @@ def test_aperture_clipping_partial_and_full():
     model = SimpleBeamModel([b], smoothing_width=0.0, deposition="beamlets", optics={"b1": blocked}, n_beamlets=64)
     s = _compute(model)
     assert not s.p_fast["beam_A2_Z1"].any() and s.meta["beams"]["b1"]["births_per_s"] == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("axis", ["horizontal", "vertical"])
+def test_divergence_is_the_1_over_e_half_angle(axis):
+    """A slit that subtends the divergence half-angle transmits erf(1) of a point source's beamlets.
+
+    The IMAS divergence alpha is the half-angle at which the angular density falls to 1/e of its maximum, so along
+    one axis the density is proportional to exp(-theta^2 / alpha^2), a Gaussian of standard deviation alpha / sqrt(2),
+    and the fraction with |theta| <= alpha is erf(alpha / (sqrt(2) * alpha / sqrt(2))) = erf(1) = 0.8427.  (Reading
+    alpha as the standard deviation would give erf(1 / sqrt(2)) = 0.6827.)  Point source, unfocused, divergence along
+    one axis only, and a slit of half-width D tan(alpha) across that axis at distance D: the beam frame is
+    orthonormal, so a beamlet at angle a crosses the slit plane at D tan(a) and passes exactly when |a| <= alpha.
+    The transmission is decided before the beamlets are traced, so the path is sampled at two points only.
+    Bound: each angle is the inverse normal of the first N = 4096 points (indices 1..N) of a van der Corput sequence
+    in base b = 5 (horizontal) or 7 (vertical), and |theta| <= alpha is an interval of u.  Indices 0..N split into
+    at most (b - 1)(m + 1) aligned blocks of b^j consecutive indices (m = floor(log_b (N + 1)) = 4 for b = 7), and
+    each block puts exactly one point in each [i / b^j, (i + 1) / b^j), so it holds its share of any [0, x) to
+    within one; dropping index 0 and N + 1 vs N cost one more each.  An interval's fraction is therefore within
+    2 (6 * 5 + 2) / 4096 = 0.016 of its measure (base 7; 0.013 for base 5); checked against 0.02, far from the 0.16
+    difference between the two readings.
+    """
+    ne, te, ions, _ = _plasma()
+    hyd, imp = _hyd_imp(ions)
+    alpha, D = 0.01, 2.0
+    if axis == "horizontal":
+        div = DivergenceComponent(1.0, alpha, 0.0)
+        slit = Aperture(distance=D, shape="rectangle", half_width_h=D * np.tan(alpha), half_width_v=0.1)
+    else:
+        div = DivergenceComponent(1.0, 0.0, alpha)
+        slit = Aperture(distance=D, shape="rectangle", half_width_h=0.1, half_width_v=D * np.tan(alpha))
+    optics = BeamOptics(width_h=0.0, width_v=0.0, focal_h=None, focal_v=None, divergence=(div,), apertures=(slit,))
+    dep = bm.beamlet_deposition(_beam(), optics, rho_of_rz, RHO, DV, ne, te, hyd, imp, n_beamlets=4096, n_steps=2)
+    assert abs(dep.info["transmission"] - math.erf(1.0)) < 0.02
 
 
 def test_model_beamlets_records_missing_inputs_and_is_deterministic():

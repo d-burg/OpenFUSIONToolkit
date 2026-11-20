@@ -64,6 +64,9 @@ new meshes, see \ref doc_gs_main_mesh_ex.
 ### Deprecated workflows
  - \subpage doc_tMaker_ITER_ex4-legacy
 
+\section doc_gs_main_kinetic Kinetic equilibrium reconstruction
+ - \subpage doc_tokamaker_kinetic_reconstruction
+
 \section doc_gs_main_conv Conventions
  - \subpage doc_tokamaker_current_conventions
  - \subpage doc_tokamaker_recon_constraints

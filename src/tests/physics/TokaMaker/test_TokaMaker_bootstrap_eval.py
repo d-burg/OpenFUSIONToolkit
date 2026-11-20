@@ -234,6 +234,74 @@ def test_ITER_bootstrap_eval_parity(order):
     assert res['no_equilibrium']
 
 
+GEOM_KEYS = ('eps', 'R_geo', 'q', '<R>', '<1/R>', '<1/R^2>', '<|B|>', '<|B|^2>')
+GEOM_BOUND = 1.0E-12
+
+
+def run_eval_geometry(mesh_resolution, fe_order, mp_q):
+    setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
+    if setup is None:
+        mp_q.put(None)
+        return
+    mygs, x, ne, Te = setup['mygs'], setup['psi_sample'], setup['ne'], setup['Te']
+    Te_k = Te/1e3
+    results = {}
+    try:
+        F = mygs.eval_bootstrap(x, Te_k, Te_k, ne, ne, setup['Zeff_val'])
+        results['lcfs'] = bool(x[-1] == 1.0)
+        results['lcfs_nan'] = bool(np.all(np.isnan([F[key][-1] for key in GEOM_KEYS])))
+        xi = x[:-1]  # The nodes that are evaluated (the LCFS is not)
+        # The separate Sauter pass on the same points (in the opposite order: eval_bootstrap passes them to the
+        # solver LCFS first, calc_sauter_fc as given)
+        _, fc, r_avgs, modb_avgs, eps = mygs.sauter_fc(psi=xi, return_eps=True)
+        sep = {'f_t': 1.0 - fc, 'eps': eps, '<R>': r_avgs['<R>'], '<1/R>': r_avgs['<1/R>'],
+               '<|B|>': modb_avgs[0], '<|B|^2>': modb_avgs[1]}
+        for key, vals in sep.items():
+            results[f'sauter_fc/{key}'] = F[key][:-1].tobytes() == np.ascontiguousarray(vals).tobytes()
+        # q, <R>, <1/R>, <1/R^2> against get_q, R_geo against get_fsa (separate contour quadratures), between the
+        # axis and the LCFS; on the axis the Sauter pass prescribes the limits (q of the next surface)
+        results['axis'] = bool(x[0] == 0.0)
+        results['axis_q'] = bool(F['q'][0] == F['q'][1])
+        xs = x[1:-1]
+        _, q, ravgs, _, _, _ = mygs.get_q(psi=xs)
+        fsa = mygs.get_fsa(psi=xs)
+        sep = {'q': q, '<R>': ravgs['<R>'], '<1/R>': ravgs['<1/R>'], '<1/R^2>': ravgs['<1/R^2>'],
+               'R_geo': 0.5*(fsa['R_min'] + fsa['R_max'])}
+        for key, vals in sep.items():
+            results[f'get_q/{key}'] = _rel(F[key][1:-1], vals)
+        results['get_q/q_sign'] = bool(np.all(np.sign(F['q'][1:-1]) == np.sign(q)))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        mp_q.put(None)
+        return
+    mp_q.put([results])
+    oftpy_dump_cov()
+
+
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap_eval_geometry(order):
+    '''The geometry eval_bootstrap returns is that of its own flux-surface pass: f_t, eps, <R>, <1/R>, <|B|> and
+    <|B|^2> equal those of a separate calc_sauter_fc call on the same points bitwise (the pass treats each surface
+    on its own, so the order of the points does not matter), and between the axis and the LCFS q, <R>, <1/R>,
+    <1/R^2> and R_geo agree with get_q and get_fsa (separate sums of the same contour quadrature) to round-off:
+    measured (GCC, x86) 0 for <R>, <1/R> and R_geo, 1.8E-16 for q and 4.1E-16 for <1/R^2>, relative to the
+    largest value; the bound, 1E-12, is the file's bound for round-off across compilers and platforms. On the
+    axis the pass prescribes the limits (q of the next surface, where get_q extrapolates: 1.4E-3 apart here).
+    The LCFS point is not evaluated (NaN).
+    '''
+    results = mp_run(run_eval_geometry, (1.0, order), timeout=300)
+    assert results is not None
+    res = results[0]
+    assert res['lcfs'] and res['lcfs_nan']
+    assert res['axis'] and res['axis_q']
+    for key in ('f_t', 'eps', '<R>', '<1/R>', '<|B|>', '<|B|^2>'):
+        assert res[f'sauter_fc/{key}'], key
+    for key in ('q', '<R>', '<1/R>', '<1/R^2>', 'R_geo'):
+        assert res[f'get_q/{key}'] < GEOM_BOUND, key
+    assert res['get_q/q_sign']
+
+
 def run_eval_insolve(mesh_resolution, fe_order, mp_q):
     setup = setup_ITER_bootstrap_internal(mesh_resolution, fe_order)
     if setup is None:

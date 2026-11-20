@@ -8,7 +8,7 @@ frames, refusals."""
 import numpy as np
 import pytest
 
-from OpenFUSIONToolkit.TokaMaker.kinetic._jdotb_redl import EC
+from OpenFUSIONToolkit.TokaMaker.kinetic.bootstrap import EC
 from OpenFUSIONToolkit.TokaMaker.kinetic.current_model import KineticProfiles, SourceProfiles, full_params, ip_target
 
 

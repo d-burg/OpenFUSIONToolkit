@@ -115,6 +115,24 @@ def test_read_kfile_trailing_group(tmp_path):
     assert [list(v) for v in ecoils.values()] == [[5.0, 1.0], [6.0, 1.0]]
 
 
+def test_namelist_double_precision_exponents(tmp_path):
+    '''Fortran double precision exponents (D or d) are read as numbers, alone, in arrays and in repeats'''
+    path = write_text(tmp_path, "&IN1\n XS = 1.5D-03\n XA = 1.0D0, 2.0d+1\n XR = 2*1.0D2\n LAST = 0\n/\n")
+    nml = read_fortran_namelist(path)
+    assert nml['XS'] == 1.5E-3
+    assert np.array_equal(nml['XA'], [1.0, 20.0]) and np.array_equal(nml['XR'], [100.0, 100.0])
+
+
+def test_namelist_null_values(tmp_path):
+    '''A null value (an empty entry between separators, or a repeat count with no value), which Fortran leaves
+    unchanged, keeps its position in the array as NaN; a trailing separator is not a null'''
+    path = write_text(tmp_path, "&IN1\n XN = 1.0, , 3.0\n XM = 2*, 5.0\n XT = 1.0, 2.0,\n LAST = 0\n/\n")
+    nml = read_fortran_namelist(path)
+    assert np.array_equal(nml['XN'], [1.0, np.nan, 3.0], equal_nan=True)
+    assert np.array_equal(nml['XM'], [np.nan, np.nan, 5.0], equal_nan=True)
+    assert np.array_equal(nml['XT'], [1.0, 2.0])
+
+
 def test_namelist_unchanged_conventions(tmp_path):
     '''Conventions the reader keeps: names keep their case, repeat counts and continued lines give arrays,
     a trailing comma adds nothing, an empty value is an empty string, logicals stay text, string arrays are

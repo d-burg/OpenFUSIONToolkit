@@ -60,7 +60,7 @@ def run_shell_command(command, timeout=10, env_vars=None):
 
 ## @cond
 _NML_INT = re.compile(r"[+-]?\d+")
-_NML_REAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+_NML_REAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][+-]?\d+)?")
 # Quoted strings (a doubled quote stands for one quote; no line breaks), and the same or a comment
 _NML_STRING = r"'(?:[^'\n]|'')*'|\"(?:[^\"\n]|\"\")*\""
 _NML_STRING_OR_COMMENT = re.compile(_NML_STRING + r"|!.*")
@@ -87,7 +87,8 @@ def _namelist_scalar(token):
     if _NML_INT.fullmatch(token):
         return int(token)
     if _NML_REAL.fullmatch(token):
-        return float(token)
+        # Fortran double precision exponents (1.0D-3)
+        return float(token.replace('d', 'e').replace('D', 'E'))
     raise ValueError("Not a namelist literal: {0}".format(token))
 
 
@@ -98,7 +99,7 @@ def _namelist_number(token):
     @result `float` or `None`
     '''
     if _NML_REAL.fullmatch(token):
-        return float(token)
+        return float(token.replace('d', 'e').replace('D', 'E'))
     if token[0] in "'\"":
         return None
     try:
@@ -111,7 +112,8 @@ def _namelist_value(text, as_array=False):
     r'''! Value of one namelist assignment
 
     Numbers give an `int` or `float` for one value and a `float` array for several values or an `r*v` repeat;
-    any other content gives the value text with separators turned into spaces (a single token is unquoted).
+    a null value (`a, , b`, `r*`), which Fortran leaves unchanged, is NaN in its position. Any other content
+    gives the value text with separators turned into spaces (a single token is unquoted).
 
     @param text Text after the `=` up to the next assignment or the end of the group, without comments
     @param as_array Return numbers as an array even for a single value
@@ -119,18 +121,26 @@ def _namelist_value(text, as_array=False):
     '''
     entries = []
     repeated = False
+    after_separator = True
     for token in _NML_TOKEN.findall(text):
         if token == ',':
+            if after_separator:
+                entries.append(None)
+            after_separator = True
             continue
+        after_separator = False
         count, star, value = token.partition('*')
         if star and _NML_INT.fullmatch(count):
-            entries.extend(int(count)*[value] if value else [])
+            entries.extend(int(count)*[value if value else None])
             repeated = True
         else:
             entries.append(token)
-    numbers = [_namelist_number(entry) for entry in entries]
+    # A separator before the next name ends the value; it is not a null
+    if entries and (entries[-1] is None) and text.rstrip().endswith(','):
+        entries.pop()
+    numbers = [numpy.nan if entry is None else _namelist_number(entry) for entry in entries]
     if entries and all(number is not None for number in numbers):
-        if as_array or repeated or len(entries) > 1:
+        if as_array or repeated or len(entries) > 1 or (entries[0] is None):
             return numpy.array(numbers, dtype=float)
         try:
             return _namelist_scalar(entries[0])

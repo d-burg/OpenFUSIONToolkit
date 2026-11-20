@@ -39,7 +39,8 @@ def _mhdin(per_line):
          "XMP2": [1.1, 2.2], "YMP2": [0.1, -0.2], "AMP2": [90.0, 30.0], "SMP2": [0.1, -0.05],
          "RF": [1.0 + 0.05 * i for i in range(18)], "ZF": [0.1 * i - 0.9 for i in range(18)],
          "WF": [0.05] * 18, "HF": [0.2] * 18, "TURNFC": [58.0] * 18, "FCID": list(range(1, 19)),
-         "ECID": [1, 1, 2, 3, 4, 5, 6], "RE": [0.8] * 7, "ZE": [0.0] * 7, "WE": [0.01] * 7, "HE": [0.1] * 7}
+         "ECID": [1, 1, 2, 3, 4, 5, 6], "RE": [0.8] * 7, "ZE": [0.0] * 7, "WE": [0.01] * 7, "HE": [0.1] * 7,
+         "NSMP2": [25]}
     return _block("MACHINEIN", d, per_line) + "comment: synthetic description\n"
 
 
@@ -138,6 +139,7 @@ def test_device_from_mhdin_matches_solver_reader(tmp_path, device):
     assert device.labels("flux_loop") == LOOPS and device.labels("bpol_probe") == PROBES
     assert device.flux_loops["r"] == [1.0, 1.5, 2.0] and device.probes["length"] == [0.1, -0.05]
     assert device.labels("pf_current") == list(d3d.F_COILS) + list(d3d.E_COILS)
+    assert device.probe_n_avg == 25
     # the solver's reader on the same content written one key per line (the layout it reads)
     from OpenFUSIONToolkit.TokaMaker.util import read_mhdin
     p = tmp_path / "mhdin_one.dat"

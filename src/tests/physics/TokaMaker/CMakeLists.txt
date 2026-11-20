@@ -30,6 +30,7 @@ configure_file( test_TokaMaker_kinetic_zeff_sources.py ${CMAKE_CURRENT_BINARY_DI
 configure_file( test_TokaMaker_kinetic_kinetics.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_edge.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_edge_detector.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
+configure_file( test_TokaMaker_kinetic_pressure.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( ITER_geom.json ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( ITER_test.eqdsk ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( ITER_test.ifile ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

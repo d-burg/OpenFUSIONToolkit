@@ -10,8 +10,51 @@ import numpy as np
 import pytest
 
 from OpenFUSIONToolkit.TokaMaker.kinetic import coordinates as CO
+from OpenFUSIONToolkit.TokaMaker.kinetic import current_model as CM
+from OpenFUSIONToolkit.TokaMaker.kinetic.geometry import MU0, FluxSurfaceGeometry, OuterLayerGeometry
 
 C = 0.995
+
+# ---------------------------------------------------------------- the analytic separatrix-like geometry
+R0, B0, F0, DPSI, IP = 1.7, 2.0, 3.4, 0.18, 1.2e6
+
+
+def F(x):
+    return F0 * (1.0 - 0.02 * x)
+
+
+def g1(x):
+    return (1.0 + 0.08 * x) / R0 ** 2
+
+
+def q_ref(x, q0=1.1):
+    return q0 + 2.2 * x ** 2 - 0.5 * np.log(np.maximum(1.0 - x, 1e-300))
+
+
+def _lag(q0=1.1, sigma_scale=1.0):
+    """A lagged-input dict like ``current_model.evaluate_geometry`` returns, on analytic surfaces."""
+    xs = np.linspace(np.sqrt(1e-3), np.sqrt(C), 200) ** 2
+    xs[-1] = C
+    q = q_ref(xs, q0)
+    vps = 4 * np.pi ** 2 * q / (F(xs) * g1(xs))
+    iref = IP * (1.6 * xs - 0.6 * xs ** 2)
+    bp2 = 2 * np.pi * MU0 * iref / vps
+    geom = FluxSurfaceGeometry.from_psi_coordinates(xs, 0.0, DPSI, vps, bp2, g1(xs), F(xs), B0=B0, R0=R0, nrho=201,
+                                                    psi_n_edge=C)
+    xl = 1.0 - (1.0 - C) * np.geomspace(1.0, 1e-2, 40)
+    xl[0] = C
+    ql = q_ref(xl, q0)
+    vl = 4 * np.pi ** 2 * ql / (F(xl) * g1(xl))
+    layer = OuterLayerGeometry.from_psi_coordinates(xl, 0.0, DPSI, vl, g1(xl), F(xl),
+                                                    avg_grad_psi2_r2=2 * np.pi * MU0 * IP * (1.6 * xl - 0.6 * xl ** 2) / vl,
+                                                    fpol_lcfs=F(1.0))
+    ge = np.unique(np.concatenate((np.linspace(1e-3, C, 300), xl)))
+    sig = sigma_scale * 1.0e8 * (0.02 + 0.98 * np.clip(1.0 - ge ** 2, 0.0, None) ** 1.5)
+    to_rho, to_psin = CM._psin_to_rho(np.asarray(geom.meta["psi_n_samples"]), np.asarray(geom.meta["rho_samples"]))
+    rmap = CO.rho_map_from_geometry(geom, layer)
+    phys = dict(psi_n=ge, rho=rmap.rho_of_psin(ge), q=q_ref(ge, q0), F=F(ge), inv_r2=g1(ge), b2=F(ge) ** 2 * g1(ge))
+    return dict(geom=geom, layer=layer, psi_n_edge=C, to_rho=to_rho, to_psin=to_psin, rho_map=rmap, phys=phys,
+                sigma=sig, jbs=B0 * 4.0e5 * np.exp(-((ge - 0.975) / 0.02) ** 2))
 
 
 def _analytic_rho_map():
@@ -49,6 +92,51 @@ def test_knots_on_an_analytic_map(rule):
         rk = m.rho_of_psin(x[x < C])
         np.testing.assert_allclose(np.diff(rk), 1.0/(s.n_knots - 1), rtol=1e-6)
         assert x[1] < 1e-3
+
+
+# ---------------------------------------------------------------- on the current model's geometry objects
+def test_rho_map_identities_and_round_trip():
+    lag = _lag()
+    m = lag["rho_map"]
+    geom = lag["geom"]
+    # inside the domain: rho = rho_dom sqrt(Phi(c)/Phi_LCFS) exactly (table construction)
+    xs, rs = np.asarray(geom.meta["psi_n_samples"]), np.asarray(geom.meta["rho_samples"])
+    np.testing.assert_allclose(m.rho_of_psin(xs), rs * m.rho_edge, rtol=1e-12)
+    assert 0.0 < m.rho_edge < 1.0 and m.phi_lcfs > m.phi_edge
+    # Phi_LCFS = Phi(c) + int F <1/R^2>/(2 pi) dV over the layer (independent quadrature of the same tabulation)
+    L = lag["layer"]
+    dens = L.fpol * L.avg_inv_r2 / (2 * np.pi)
+    assert m.phi_lcfs == pytest.approx(geom.phi_b + L.integral(dens), rel=1e-12)
+    r = np.linspace(0.0, 1.0, 101)
+    np.testing.assert_allclose(m.rho_of_psin(m.psin_of_rho(r)), r, atol=1e-10)
+    with pytest.raises(ValueError):
+        m.rho_of_psin([1.2])
+
+
+@pytest.mark.parametrize("rule", CO.KNOT_RULES)
+def test_knots_monotone_cover_axis_edge_and_layer(rule):
+    m = _lag()["rho_map"]
+    s = CO.KnotSettings(rule=rule)
+    x, rec = CO.solver_knots(m, s)
+    assert x[0] == 0.0 and x[-1] == 1.0 and np.all(np.diff(x) > 0)
+    assert np.any(np.abs(x - C) < 1e-15)                         # the domain edge is a knot
+    assert np.count_nonzero((x > C) & (x < 1.0)) == s.n_layer_knots
+    assert rec["n_layer"] == s.n_layer_knots + 1
+    if rule == "rho_tor_uniform":
+        rk = m.rho_of_psin(x[x < C])
+        # uniform in rho: interior spacing constant to round-off of the map inversion
+        np.testing.assert_allclose(np.diff(rk), 1.0 / (s.n_knots - 1), rtol=1e-6)
+        assert x[1] < 1e-3                                        # packed at the axis (psi_N ~ rho^2)
+
+
+def test_knots_change_with_the_equilibrium_only_for_the_rho_rule():
+    a, b = _lag(q0=1.1)["rho_map"], _lag(q0=0.8)["rho_map"]
+    xa, _ = CO.solver_knots(a, CO.KnotSettings())
+    xb, _ = CO.solver_knots(b, CO.KnotSettings())
+    assert np.max(np.abs(xa - xb)) > 1e-3
+    for rule in ("sqrt_psin_uniform", "psin_uniform"):
+        np.testing.assert_array_equal(CO.solver_knots(a, CO.KnotSettings(rule=rule))[0],
+                                      CO.solver_knots(b, CO.KnotSettings(rule=rule))[0])
 
 
 # ============================================================== q check

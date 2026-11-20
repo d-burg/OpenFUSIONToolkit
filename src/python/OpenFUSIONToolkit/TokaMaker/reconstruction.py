@@ -43,6 +43,10 @@ tokamaker_recon_setup = ctypes_subroutine(oftpy_lib.tokamaker_recon_setup,
 # tokamaker_recon_destroy(tMaker_ptr,error_flag)
 tokamaker_recon_destroy = ctypes_subroutine(oftpy_lib.tokamaker_recon_destroy,
     [c_void_p, c_int_ptr])
+
+# tokamaker_recon_locate(tMaker_ptr,loc_mat,error_flag)
+tokamaker_recon_locate = ctypes_subroutine(oftpy_lib.tokamaker_recon_locate,
+    [c_void_p, c_double_ptr, c_int_ptr])
 ## @endcond
 
 Mirnov_con_id = 1
@@ -53,64 +57,181 @@ Press_con_id = 9
 q_con_id = 10
 saddle_con_id = 11
 coil_current_con_id = 12
+MSE_con_id = 13
+finite_Mirnov_con_id = 14
+coil_total_current_con_id = 15
+
+## Format specification for real numbers in the constraint file (a constant of the file format, not a setting): 17
+## significant digits, so every value is read back exactly as it was given
+CON_FILE_REAL_FORMAT = '.16E'
+
+## @cond
+def _check_finite(name, value, shape=None):
+    '''Return `value` as a float array, raising `ValueError` unless it is finite (and of `shape`, if given); booleans
+    are not numbers here'''
+    if numpy.asarray(value).dtype == numpy.bool_:
+        raise ValueError("{0} must be numeric".format(name))
+    try:
+        arr = numpy.asarray(value, dtype=numpy.float64)
+    except (TypeError, ValueError):
+        raise ValueError("{0} must be numeric".format(name))
+    if (shape is not None) and (arr.shape != shape):
+        raise ValueError("{0} must have shape {1}".format(name, shape))
+    if not numpy.all(numpy.isfinite(arr)):
+        raise ValueError("{0} must be finite".format(name))
+    return arr
+
+
+def _check_location(loc):
+    '''Return an R-Z location as a tuple of floats, raising `ValueError` unless it is finite with R > 0'''
+    loc = _check_finite('Location', loc, (2,))
+    if loc[0] <= 0.0:
+        raise ValueError("Location must have R > 0")
+    return (float(loc[0]), float(loc[1]))
+
+
+def _check_error(err):
+    '''Return a constraint error as a float, raising `ValueError` unless it is finite and positive'''
+    err = float(_check_finite('Error', err, ()))
+    if err <= 0.0:
+        raise ValueError("Error must be positive")
+    return err
+
+
+def _check_use(use):
+    '''Return the used flag as a bool, raising `ValueError` unless it is True or False'''
+    if not isinstance(use, (bool, numpy.bool_)):
+        raise ValueError("`use` must be True or False")
+    return bool(use)
+
+
+def _file_weight(err, use):
+    '''Weight written to the constraint file: 1/err for a used constraint, -1/err for an unused one (the solver
+    clips weights at zero, so the row is evaluated but does not enter the fit), 0 if there is no error'''
+    if err is None:
+        if use:
+            raise ValueError("A used constraint needs an error")
+        return 0.0
+    if use:
+        return 1./err
+    return -1./err
+
+
+def _read_weight(value):
+    '''Error and used flag from a weight in the constraint file (inverse of `_file_weight`)'''
+    wt = float(value)
+    if wt > 0.0:
+        return 1./wt, True
+    if wt < 0.0:
+        return -1./wt, False
+    return None, False
+## @endcond
 
 
 class Mirnov_con:
-    '''! TokaMaker equilibrium reconstruction Mirnov sensor constraint'''
-    def __init__(self, loc=None, phi=0., norm=None, val=None, err=None):
+    r'''! TokaMaker equilibrium reconstruction Mirnov sensor constraint
+
+    The modeled signal is \f$ \mathbf{B} \cdot \mathbf{n} \f$ at the sensor location (point probe, the default), or its
+    mean over `n_avg` points for a finite-length probe: the points are the midpoints of `n_avg` equal parts of a
+    straight segment of length \f$ |L| \f$ centered on the sensor, at offsets
+    \f$ (k - (n_{avg}-1)/2) |L| / n_{avg} \f$, \f$ k = 0 \ldots n_{avg}-1 \f$, along the unit vector
+    \f$ (n_R, n_Z)/|(n_R, n_Z)| \f$ for \f$ L > 0 \f$ and along \f$ (-n_Z, n_R)/|(n_R, n_Z)| \f$ (that vector
+    rotated by +90 degrees in the R-Z plane) for \f$ L < 0 \f$. This is the convention of the EFIT probe length
+    `SMP2` (\f$ L < 0 \f$ for probes whose segment is perpendicular to the measured direction).
+    '''
+    def __init__(self, loc=None, phi=0., norm=None, val=None, err=None, length=None, n_avg=None, use=True):
         r'''! Create Mirnov sensor constraint
 
         @param loc Location of Mirnov in R-Z plane [2]
         @param phi Toroidal location [rad] (only meaningful with 3D fields)
         @param norm Unit normal \f$ (R,\phi,Z) \f$ [3]
         @param val Value of constraint
-        @param err Error in constraint
+        @param err Error in constraint (positive)
+        @param length Signed probe length \f$ L \f$ [m] (`None` for a point probe; see class description)
+        @param n_avg Number of averaging points of a finite-length probe (required with `length`)
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         if norm is not None and numpy.shape(norm) != (3,):
             raise ValueError("Mirnov normal must have three components (R, phi, Z)")
+        if (length is None) != (n_avg is None):
+            raise ValueError("Finite-length Mirnov sensors need both `length` and `n_avg`")
+        if length is not None:
+            length = float(_check_finite('Mirnov length', length, ()))
+            if isinstance(n_avg, (bool, numpy.bool_)) or (not isinstance(n_avg, (int, numpy.integer))) or (n_avg < 1):
+                raise ValueError("Mirnov `n_avg` must be an integer >= 1")
+            n_avg = int(n_avg)
+            if norm is None:
+                raise ValueError("Finite-length Mirnov sensors need a normal")
+            norm_chk = _check_finite('Mirnov normal', norm, (3,))
+            if (length != 0.0) and (norm_chk[0] == 0.0) and (norm_chk[2] == 0.0):
+                raise ValueError("Finite-length Mirnov sensors need a nonzero poloidal (R, Z) normal component")
         self.loc = loc
         self.phi = phi
         self.norm = norm
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
+        ## Signed probe length [m] (`None` for a point probe)
+        self.length = length
+        ## Number of averaging points of a finite-length probe
+        self.n_avg = n_avg
 
-    def read(self, file):
+    def read(self, file, finite_length=False):
         '''! Read Mirnov constraint from file
 
         @param file Open file object containing constraint, must be positioned at start of constraint
+        @param finite_length Read a finite-length probe record (type 14) instead of a point probe record (type 1)
         '''
         values = file.readline().split()
         self.loc = (float(values[0]), float(values[1]))
         self.phi = float(values[2])
         values = file.readline().split()
         self.norm = (float(values[0]), float(values[1]), float(values[2]))
+        if finite_length:
+            values = file.readline().split()
+            self.length = float(values[0])
+            self.n_avg = int(values[1])
+            if self.n_avg < 1:
+                raise ValueError("Invalid value in file: Mirnov `n_avg` must be >= 1")
+        else:
+            self.length = None
+            self.n_avg = None
         values = file.readline().split()
         self.val = float(values[0])
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write Mirnov constraint to file
 
         @param file Open file object for saving constraints
         '''
-        file.write('{0}\n'.format(Mirnov_con_id))
-        file.write(' {0:E} {1:E} {2:E}\n'.format(self.loc[0], self.loc[1], self.phi))
-        file.write(' {0:E} {1:E} {2:E}\n'.format(self.norm[0], self.norm[1], self.norm[2]))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        if self.length is None:
+            file.write('{0}\n'.format(Mirnov_con_id))
+        else:
+            file.write('{0}\n'.format(finite_Mirnov_con_id))
+        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.loc[0], self.loc[1], self.phi, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.norm[0], self.norm[1], self.norm[2], f=CON_FILE_REAL_FORMAT))
+        if self.length is not None:
+            file.write(' {0:{f}} {1:d}\n'.format(self.length, self.n_avg, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class Ip_con:
     '''! TokaMaker equilibrium reconstruction plasma current constraint'''
-    def __init__(self, val=None, err=None):
+    def __init__(self, val=None, err=None, use=True):
         '''! Create plasma current constraint
 
         @param val Value of constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         if val is not None and val <= 0.0:
             raise ValueError("Plasma current constraint must be positive")
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
 
     def read(self, file):
         '''! Read plasma current constraint from file
@@ -119,11 +240,10 @@ class Ip_con:
         '''
         values = file.readline().split()
         Ip = float(values[0])
-        err = float(values[1])
         if Ip <= 0.0:
             raise ValueError("Invalid value in file: Plasma current constraint must be positive")
         self.val = Ip
-        self.err = 1./err
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write plasma current constraint to file
@@ -131,21 +251,29 @@ class Ip_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(Ip_con_id))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class fluxLoop_con:
-    '''! TokaMaker equilibrium reconstruction full flux loop constraint'''
-    def __init__(self, loc=None, val=None, err=None):
+    r'''! TokaMaker equilibrium reconstruction full flux loop constraint
+
+    The modeled signal is \f$ 2\pi\psi(R,Z) \f$ [Wb], with \f$ \psi \f$ TokaMaker's poloidal flux per radian (as returned
+    by `get_field_eval('PSI')`). A flux in the COCOS 11 convention equals \f$ -2\pi\psi \f$, so it enters with the
+    opposite sign (see \ref doc_tokamaker_recon_constraints).
+    '''
+    def __init__(self, loc=None, val=None, err=None, use=True):
         '''! Create full flux loop sensor constraint
 
         @param loc Location of Mirnov in R-Z plane [2]
         @param val Value of constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         self.loc = loc
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
 
     def read(self, file):
         '''! Read full flux loop constraint from file
@@ -156,7 +284,7 @@ class fluxLoop_con:
         self.loc = (float(values[0]), float(values[1]))
         values = file.readline().split()
         self.val = float(values[0])
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write full flux loop constraint to file
@@ -164,20 +292,23 @@ class fluxLoop_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(fluxLoop_con_id))
-        file.write(' {0:E} {1:E}\n'.format(self.loc[0], self.loc[1]))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.loc[0], self.loc[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class dFlux_con:
     '''! TokaMaker equilibrium reconstruction diamagnetic flux constraint'''
-    def __init__(self, val=None, err=None):
+    def __init__(self, val=None, err=None, use=True):
         '''! Create diamagnetic flux constraint
 
         @param val Value of constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
 
     def read(self, file):
         '''! Read diamagnetic flux constraint from file
@@ -186,7 +317,7 @@ class dFlux_con:
         '''
         values = file.readline().split()
         self.val = float(values[0])
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write diamagnetic flux constraint to file
@@ -194,23 +325,26 @@ class dFlux_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(dFlux_con_id))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class Press_con:
     '''! TokaMaker equilibrium reconstruction plasma pressure constraint'''
-    def __init__(self, loc=None, val=None, err=None):
+    def __init__(self, loc=None, val=None, err=None, use=True):
         '''! Create plasma pressure constraint
 
         @param loc Location of measurement in R-Z plane [2]
         @param val Value of pressure constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         if val is not None and val <= 0.0:
             raise ValueError("Plasma pressure constraints must be positive")
         self.loc = loc
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
 
     def read(self, file):
         '''! Read plasma pressure constraint from file
@@ -224,7 +358,7 @@ class Press_con:
         if pressure <= 0.0:
             raise ValueError("Invalid value in file: Plasma pressure constraints must be positive")
         self.val = pressure
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write plasma pressure constraint to file
@@ -232,23 +366,26 @@ class Press_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(Press_con_id))
-        file.write(' {0:E} {1:E}\n'.format(self.loc[0], self.loc[1]))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.loc[0], self.loc[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class q_con:
     '''! TokaMaker equilibrium reconstruction local safety factor constraint'''
-    def __init__(self, type=None, loc=0., val=None, err=None):
+    def __init__(self, type=None, loc=0., val=None, err=None, use=True):
         r'''! Create local safety factor constraint
 
         @param type Type of constraint
         @param loc Location of constraint in \f$ \hat{\psi} \f$
         @param val Value of constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         self.type = type
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
         self.loc = loc
 
     def read(self, file):
@@ -261,7 +398,7 @@ class q_con:
         self.loc = float(values[1])
         values = file.readline().split()
         self.val = float(values[0])
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write local safety factor constraint to file
@@ -269,13 +406,13 @@ class q_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(q_con_id))
-        file.write(' {0:E} {1:E}\n'.format(self.type, self.loc))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        file.write(' {0:E} {1:{f}}\n'.format(self.type, self.loc, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class saddle_con:
     '''! TokaMaker equilibrium reconstruction saddle flux loop constraint '''
-    def __init__(self, pt1=None, pt2=None, width=None, val=None, err=None):
+    def __init__(self, pt1=None, pt2=None, width=None, val=None, err=None, use=True):
         '''! Create saddle flux loop sensor constraint
 
         @param pt1 Location of first toroidal saddle leg in R-Z plane [2]
@@ -283,12 +420,15 @@ class saddle_con:
         @param width Toroidal extent in radians
         @param val Value of saddle loop constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
         self.pt1 = pt1
         self.pt2 = pt2
         self.width = width
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
 
     def read(self, file):
         '''! Read saddle flux loop constraint from file
@@ -303,7 +443,7 @@ class saddle_con:
         self.width = float(value)
         values = file.readline().split()
         self.val = float(values[0])
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write saddle flux loop constraint to file
@@ -311,44 +451,146 @@ class saddle_con:
         @param file Open file object for saving constraints
         '''
         file.write('{0}\n'.format(saddle_con_id))
-        file.write(' {0:E} {1:E}\n'.format(self.pt1[0], self.pt1[1]))
-        file.write(' {0:E} {1:E}\n'.format(self.pt2[0], self.pt2[1]))
-        file.write(' {0:E}\n'.format(self.width))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./self.err))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.pt1[0], self.pt1[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.pt2[0], self.pt2[1], f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}}\n'.format(self.width, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 class coil_current_con:
-    '''! TokaMaker equilibrium reconstruction coil current constraint'''
-    def __init__(self, ind=None, val=None, err=None):
+    '''! TokaMaker equilibrium reconstruction coil current constraint
+
+    The modeled signal is the coil set's current [A] (type 12, the default) or, with `total=True`, its total current as
+    returned by `get_coil_currents()`, which includes its share of the virtual vertical stability coil (type 15).
+    '''
+    def __init__(self, ind=None, val=None, err=None, use=True, total=False):
         '''! Create coil current constraint
 
         @param ind Index of coil
         @param val Value of constraint [A]
         @param err Error in constraint [A]
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
+        @param total Constrain the total current, including the virtual vertical stability coil share?
         '''
         self.ind = ind
         self.val = val
-        self.err = err
+        self.err = None if err is None else _check_error(err)
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
+        if not isinstance(total, (bool, numpy.bool_)):
+            raise ValueError("`total` must be True or False")
+        ## Constrain the total current (including the virtual vertical stability coil share)?
+        self.total = bool(total)
 
-    def read(self, file):
+    def read(self, file, total=False):
         '''! Read coil current constraint from file
 
         @param file Open file object containing constraint, must be positioned at start of constraint
+        @param total Read a total current record (type 15) instead of a coil current record (type 12)
         '''
+        self.total = total
         values = file.readline()
         self.ind = int(values) - 1
         values = file.readline().split()
         self.val = float(values[0])
-        self.err = 1./float(values[1])
+        self.err, self.use = _read_weight(values[1])
 
     def write(self, file):
         '''! Write coil current constraint to file
 
         @param file Open file object for saving constraints
         '''
-        file.write('{0}\n'.format(coil_current_con_id))
+        file.write('{0}\n'.format(coil_total_current_con_id if self.total else coil_current_con_id))
         file.write(' {0}\n'.format(self.ind+1))
-        file.write(' {0:E} {1:E}\n\n'.format(self.val, 1./(self.err)))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
+
+
+class MSE_con:
+    r'''! TokaMaker equilibrium reconstruction motional Stark effect (MSE) constraint
+
+    The modeled signal at the chord's measurement point is (IMAS coefficient order)
+    \f[ \tan \gamma = \frac{c_0 B_Z + c_1 B_R + c_2 B_\phi + c_3 E_R}{c_4 B_Z + c_5 B_R + c_6 B_\phi + c_7 E_R + c_8 E_Z} \f]
+    or \f$ \gamma = \arctan(\tan \gamma) \in (-\pi/2, \pi/2) \f$ [rad], with \f$ (B_R, B_\phi, B_Z) \f$ the field in
+    TokaMaker's right-handed \f$ (R, \phi, Z) \f$ frame, evaluated as for Mirnov sensors (\f$ B_\phi = F(\psi)/R \f$ at
+    the point, with no test of whether the point lies inside the plasma), and the electric field \f$ (E_R, E_Z) \f$
+    supplied by the caller. Any map from a device's orientation (current or toroidal field direction, sign of the
+    measured angle) to this frame is the caller's statement and belongs in the signs of the coefficients.
+
+    Where the denominator changes sign, \f$ \tan \gamma \f$ diverges and \f$ \gamma \f$ jumps by \f$ \pi \f$; a
+    denominator that is exactly zero gives NaN (a failed evaluation in `reconstruct()`, a warning in `eval_error()`).
+    Coefficients and electric fields for which the denominator vanishes identically are rejected.
+    '''
+    ## Allowed values of `quantity` and their file codes
+    quantities = {'tan': 1, 'angle': 2}
+
+    def __init__(self, loc=None, coefs=None, val=None, err=None, quantity='tan', E_R=0., E_Z=0., phi=0., use=True):
+        r'''! Create MSE constraint
+
+        @param loc Location of the measurement point in the R-Z plane [2]
+        @param coefs Geometry coefficients \f$ c_0 \ldots c_8 \f$ in IMAS order [9]
+        @param val Measured value (\f$ \tan \gamma \f$, or \f$ \gamma \f$ [rad] if `quantity='angle'`)
+        @param err Error in constraint (same units as `val`)
+        @param quantity Measured quantity, `'tan'` (\f$ \tan \gamma \f$) or `'angle'` (\f$ \gamma \f$ [rad])
+        @param E_R Radial electric field at the measurement point [V/m]
+        @param E_Z Vertical electric field at the measurement point [V/m]
+        @param phi Toroidal location [rad] (recorded only; fields are axisymmetric)
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
+        '''
+        ## Use the constraint in the fit? (an unused constraint is evaluated, with zero weight)
+        self.use = _check_use(use)
+        if quantity not in MSE_con.quantities:
+            raise ValueError("MSE quantity must be one of {0}".format(tuple(MSE_con.quantities)))
+        self.quantity = quantity
+        self.loc = None if loc is None else _check_location(loc)
+        self.E_R = float(_check_finite('E_R', E_R, ()))
+        self.E_Z = float(_check_finite('E_Z', E_Z, ()))
+        self.coefs = None
+        if coefs is not None:
+            self.coefs = tuple(float(c) for c in _check_finite('MSE coefficients', coefs, (9,)))
+            if (not any(self.coefs[4:7])) and (self.coefs[7]*self.E_R + self.coefs[8]*self.E_Z == 0.0):
+                raise ValueError("MSE denominator is identically zero (c_4 = c_5 = c_6 = 0 and c_7 E_R + c_8 E_Z = 0)")
+        self.val = None
+        if val is not None:
+            self.val = float(_check_finite('MSE value', val, ()))
+            if (quantity == 'angle') and (abs(self.val) >= numpy.pi/2.):
+                raise ValueError("MSE angle must lie in (-pi/2, pi/2)")
+        self.err = None if err is None else _check_error(err)
+        self.phi = float(_check_finite('phi', phi, ()))
+
+    def read(self, file):
+        '''! Read MSE constraint from file
+
+        @param file Open file object containing constraint, must be positioned at start of constraint
+        '''
+        values = file.readline().split()
+        self.loc = (float(values[0]), float(values[1]))
+        self.phi = float(values[2])
+        self.coefs = tuple(float(value) for value in file.readline().split())
+        if len(self.coefs) != 9:
+            raise ValueError("Invalid MSE constraint in file: nine coefficients are required")
+        values = file.readline().split()
+        self.E_R = float(values[0])
+        self.E_Z = float(values[1])
+        code = int(file.readline())
+        quantity = [key for key, val in MSE_con.quantities.items() if val == code]
+        if len(quantity) != 1:
+            raise ValueError("Invalid MSE quantity in file")
+        self.quantity = quantity[0]
+        values = file.readline().split()
+        self.val = float(values[0])
+        self.err, self.use = _read_weight(values[1])
+
+    def write(self, file):
+        '''! Write MSE constraint to file
+
+        @param file Open file object for saving constraints
+        '''
+        file.write('{0}\n'.format(MSE_con_id))
+        file.write(' {0:{f}} {1:{f}} {2:{f}}\n'.format(self.loc[0], self.loc[1], self.phi, f=CON_FILE_REAL_FORMAT))
+        file.write(' ' + ' '.join('{0:{f}}'.format(c, f=CON_FILE_REAL_FORMAT) for c in self.coefs) + '\n')
+        file.write(' {0:{f}} {1:{f}}\n'.format(self.E_R, self.E_Z, f=CON_FILE_REAL_FORMAT))
+        file.write(' {0:d}\n'.format(MSE_con.quantities[self.quantity]))
+        file.write(' {0:{f}} {1:{f}}\n\n'.format(self.val, _file_weight(self.err, self.use), f=CON_FILE_REAL_FORMAT))
 
 
 con_map = {
@@ -359,7 +601,10 @@ con_map = {
     Press_con_id: Press_con,
     q_con_id: q_con,
     saddle_con_id: saddle_con,
-    coil_current_con_id: coil_current_con
+    coil_current_con_id: coil_current_con,
+    MSE_con_id: MSE_con,
+    finite_Mirnov_con_id: Mirnov_con,
+    coil_total_current_con_id: coil_current_con
 }
 
 
@@ -440,7 +685,11 @@ class tokamaker_recon_settings:
 
 
 class reconstruction():
-    '''! TokaMaker equilibrium reconstruction class'''
+    '''! TokaMaker equilibrium reconstruction class
+
+    The constraint types, their modeled signals, sign conventions and file records are described in
+    \\ref doc_tokamaker_recon_constraints.
+    '''
     def __init__(self,tMaker_obj,in_filename='fit.in',out_filename='fit.out'):
         '''! Create equilibrium reconstruction object
 
@@ -466,12 +715,18 @@ class reconstruction():
         self._pressure_cons = []
         ## Coil current constraints
         self._coil_current_cons = []
+        ## MSE constraints
+        self._mse_cons = []
         ## Name of constraint file (input for reconstruction)
         self.con_file = in_filename
         ## Name of reconstruction output file
         self.out_file = out_filename
         ## Number of constraints in underlying Fortran object
         self._ncons = 0
+        ## Constraints with evaluation points off the mesh, moved to the nearest mesh boundary node, found by the last
+        ## `setup_constraints()`: one dictionary per constraint with keys `index` (row in `eval_error` and in
+        ## `get_constraints()`), `constraint`, `points` (number of moved points) and `distance` (largest move [m])
+        self.projected = []
         # Update settings
         self.settings.infile = self.con_file
         self.settings.outfile = self.out_file
@@ -503,60 +758,91 @@ class reconstruction():
         self._saddles = []
         self._pressure_cons = []
         self._coil_current_cons = []
+        self._mse_cons = []
         self.con_file = None
         self.out_file = None
         self._ncons = 0
 
-    def set_Ip(self,Ip,err):
+    def set_Ip(self,Ip,err,use=True):
         '''! Set plasma current constraint
 
         @param Ip Value of plasma current constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._Ip_con = Ip_con(val=Ip, err=err)
+        self._Ip_con = Ip_con(val=Ip, err=err, use=use)
 
-    def set_DFlux(self,DFlux,err):
+    def set_DFlux(self,DFlux,err,use=True):
         '''! Set diamagnetic flux constraint
 
         @param DFlux Value of diamagnetic flux constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._Dflux_con = dFlux_con(val=DFlux, err=err)
+        self._Dflux_con = dFlux_con(val=DFlux, err=err, use=use)
 
-    def set_coil_currents(self,targets,errs):
+    def set_coil_currents(self,targets,errs,use=None,total=False):
         '''! Set coil current constraints
 
-        @param targets Dictionary of coil current targets
-        @param errs Dictionary of coil current constraint errors
+        The constrained quantity is each coil set's current or, with `total=True`, its total current as returned by
+        `get_coil_currents()` (including the share of the virtual vertical stability coil; see
+        \\ref doc_tokamaker_recon_constraints for its use with `fitCoils`). Coil sets without a target are not
+        constrained. All input is checked before the existing coil current constraints are replaced.
+
+        @param targets Dictionary of coil current targets [A] by coil set name (any subset of the coil sets)
+        @param errs Dictionary of coil current constraint errors [A] (one for every target; others are ignored)
+        @param use Dictionary of used flags by coil set (default: all used); an unused constraint is evaluated but has
+        zero weight
+        @param total Constrain total currents (True) or coil currents (False, the default), for all targets
         '''
+        if use is None:
+            use = {}
+        if not isinstance(total, (bool, numpy.bool_)):
+            raise ValueError("`total` must be True or False")
+        for name in targets:
+            if name not in self._tMaker_obj.coil_sets:
+                raise KeyError(f"Unknown coil set '{name}'")
+            if name not in errs:
+                raise KeyError(f"Missing coil current error for coil set '{name}'")
+            _check_finite(f"Coil current target for '{name}'", targets[name], ())
+            _check_error(errs[name])
+        for name in use:
+            if name not in targets:
+                raise KeyError(f"Used flag given for coil set '{name}' without a coil current target")
+            _check_use(use[name])
         self._coil_current_cons = []
         for name, coil_set in self._tMaker_obj.coil_sets.items():
             if name not in targets:
-                raise KeyError(f"Missing coil current target for coil set '{name}'")
-            if name not in errs:
-                raise KeyError(f"Missing coil current error for coil set '{name}'")
-            self._coil_current_cons.append(coil_current_con(ind=coil_set['id'], val=targets[name], err=errs[name]))
+                continue
+            self._coil_current_cons.append(coil_current_con(ind=coil_set['id'], val=targets[name], err=errs[name],
+                                                            use=use.get(name, True), total=total))
 
-    def add_flux_loop(self,loc,val,err):
-        '''! Add full poloidal flux loop constraint
+    def add_flux_loop(self,loc,val,err,use=True):
+        r'''! Add full poloidal flux loop constraint
 
         @param loc Location of flux loop in R-Z plane [2]
-        @param val Value of flux loop constraint
+        @param val Value of flux loop constraint [Wb], in TokaMaker's sign convention (modeled as \f$ 2\pi\psi \f$; a
+        COCOS 11 flux enters with the opposite sign, see \ref doc_tokamaker_recon_constraints)
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._flux_loops.append(fluxLoop_con(loc=loc, val=val, err=err))
+        self._flux_loops.append(fluxLoop_con(loc=loc, val=val, err=err, use=use))
 
-    def add_Mirnov(self,loc,norm,val,err):
+    def add_Mirnov(self,loc,norm,val,err,length=None,n_avg=None,use=True):
         r'''! Add Mirnov sensor constraint
 
         @param loc Location of Mirnov in R-Z plane [2]
         @param norm Unit normal \f$ (R,\phi,Z) \f$ [3]; use a zero toroidal component for a poloidal probe
         @param val Value of Mirnov constraint
         @param err Error in constraint
+        @param length Signed probe length [m] for a finite-length probe (`None`, the default, for a point probe; the
+        segment geometry is described in \ref OpenFUSIONToolkit.TokaMaker.reconstruction.Mirnov_con "Mirnov_con")
+        @param n_avg Number of averaging points of a finite-length probe (required with `length`)
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._mirnovs.append(Mirnov_con(loc=loc, norm=norm, val=val, err=err))
+        self._mirnovs.append(Mirnov_con(loc=loc, norm=norm, val=val, err=err, length=length, n_avg=n_avg, use=use))
 
-    def add_saddle(self,p1,p2,width,val,err):
+    def add_saddle(self,p1,p2,width,val,err,use=True):
         '''! Add saddle loop constraint
 
         @param p1 Location of first toroidal saddle leg in R-Z plane [2]
@@ -564,17 +850,39 @@ class reconstruction():
         @param width Toroidal extent in radians
         @param val Value of saddle loop constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._saddles.append(saddle_con(p1=p1, p2=p2, width=width, val=val, err=err))
+        self._saddles.append(saddle_con(pt1=p1, pt2=p2, width=width, val=val, err=err, use=use))
 
-    def add_pressure(self,loc,val,err):
+    def add_pressure(self,loc,val,err,use=True):
         '''! Add plasma pressure constraint
 
         @param loc Location of measurement in R-Z plane [2]
         @param val Value of pressure constraint
         @param err Error in constraint
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
         '''
-        self._pressure_cons.append(Press_con(loc=loc,val=val,err=err))
+        self._pressure_cons.append(Press_con(loc=loc,val=val,err=err,use=use))
+
+    def add_MSE(self,loc,coefs,val,err,quantity='tan',E_R=0.,E_Z=0.,phi=0.,use=True):
+        r'''! Add motional Stark effect (MSE) constraint (see \ref OpenFUSIONToolkit.TokaMaker.reconstruction.MSE_con
+        "MSE_con" for the model and sign conventions)
+
+        @param loc Location of the measurement point in the R-Z plane [2]
+        @param coefs Geometry coefficients \f$ c_0 \ldots c_8 \f$ in IMAS order [9]
+        @param val Measured value (\f$ \tan \gamma \f$, or \f$ \gamma \f$ [rad] if `quantity='angle'`)
+        @param err Error in constraint (same units as `val`)
+        @param quantity Measured quantity, `'tan'` (\f$ \tan \gamma \f$) or `'angle'` (\f$ \gamma \f$ [rad])
+        @param E_R Radial electric field at the measurement point [V/m]
+        @param E_Z Vertical electric field at the measurement point [V/m]
+        @param phi Toroidal location [rad] (recorded only; fields are axisymmetric)
+        @param use Use the constraint in the fit? (if False it is evaluated but has zero weight)
+        '''
+        for name, value in (('Location', loc), ('MSE coefficients', coefs), ('MSE value', val), ('Error', err)):
+            if value is None:
+                raise ValueError("{0} is required".format(name))
+        self._mse_cons.append(MSE_con(loc=loc, coefs=coefs, val=val, err=err, quantity=quantity, E_R=E_R, E_Z=E_Z, phi=phi,
+                                      use=use))
 
     def reset_constraints(self):
         '''! Remove all current constraints'''
@@ -585,14 +893,27 @@ class reconstruction():
         self._saddles = []
         self._pressure_cons = []
         self._coil_current_cons = []
+        self._mse_cons = []
 
-    def write_fit_in(self):
-        '''! Create reconstruction input file for specified constraints'''
+    def get_constraints(self):
+        '''! Get all constraints in the order of the constraint file and of the rows of `eval_error`
+
+        The order is: flux loops, Mirnov sensors, saddle loops, pressures, coil currents, plasma current, diamagnetic
+        flux, MSE.
+
+        @result List of constraint objects
+        '''
         constraints = self._flux_loops + self._mirnovs + self._saddles + self._pressure_cons + self._coil_current_cons
         if self._Ip_con is not None:
             constraints.append(self._Ip_con)
         if self._Dflux_con is not None:
             constraints.append(self._Dflux_con)
+        constraints += self._mse_cons
+        return constraints
+
+    def write_fit_in(self):
+        '''! Create reconstruction input file for specified constraints'''
+        constraints = self.get_constraints()
         ncons = len(constraints)
         with open(self.con_file, 'w+') as fid:
             fid.write('{0:d}\n\n'.format(ncons))
@@ -609,21 +930,28 @@ class reconstruction():
                 con_type = int(fid.readline())
                 new_con_class = con_map[con_type]
                 new_con = new_con_class()
-                new_con.read(fid)
+                if con_type == finite_Mirnov_con_id:
+                    new_con.read(fid, finite_length=True)
+                elif con_type == coil_total_current_con_id:
+                    new_con.read(fid, total=True)
+                else:
+                    new_con.read(fid)
                 if con_type == Ip_con_id:
                     self._Ip_con = new_con
                 elif con_type == dFlux_con_id:
                     self._Dflux_con = new_con
                 elif con_type == fluxLoop_con_id:
                     self._flux_loops.append(new_con)
-                elif con_type == Mirnov_con_id:
+                elif con_type in (Mirnov_con_id, finite_Mirnov_con_id):
                     self._mirnovs.append(new_con)
                 elif con_type == saddle_con_id:
                     self._saddles.append(new_con)
                 elif con_type == Press_con_id:
                     self._pressure_cons.append(new_con)
-                elif con_type == coil_current_con_id:
+                elif con_type in (coil_current_con_id, coil_total_current_con_id):
                     self._coil_current_cons.append(new_con)
+                elif con_type == MSE_con_id:
+                    self._mse_cons.append(new_con)
                 else:
                     raise ValueError("Unknown constraint type")
 
@@ -724,8 +1052,9 @@ class reconstruction():
                                     len(self._pressure_cons),
                                     len(self._coil_current_cons),
                                     1 if self._Ip_con is not None else 0,
-                                    1 if self._Dflux_con is not None else 0])
-            names = ['Flux loops', 'Mirnovs', 'Saddle loops', 'Pressure', r'$I_C$', r'$I_p$', r'$\Delta \Phi$']
+                                    1 if self._Dflux_con is not None else 0,
+                                    len(self._mse_cons)])
+            names = ['Flux loops', 'Mirnovs', 'Saddle loops', 'Pressure', r'$I_C$', r'$I_p$', r'$\Delta \Phi$', 'MSE']
             chi_ax.set_title(r'Signal $\chi^2$ contributions')
             chi_ax.set_xlabel('Signal Index')
             chi_ax.set_ylabel(r'$\chi^2_i$')
@@ -737,6 +1066,9 @@ class reconstruction():
 
     def setup_constraints(self):
         '''! Set up constraints in TokaMaker for current equilibrium without performing reconstruction
+
+        Evaluation points that lie off the mesh are moved to the nearest mesh boundary node, as in `reconstruct()`;
+        such constraints are listed in `projected` and a warning is printed.
 
         @result Error flag
         '''
@@ -751,6 +1083,18 @@ class reconstruction():
         if error_flag.value != 0:
             raise ValueError("Constraint setup failed with error code {0:d}".format(error_flag.value))
         self._ncons = ncons.value
+        # Locate evaluation points and report those moved onto the mesh boundary
+        loc_mat = numpy.zeros((self._ncons, 2), dtype=numpy.float64)
+        tokamaker_recon_locate(self._tMaker_obj._tMaker_ptr,loc_mat.ctypes.data_as(c_double_ptr),ctypes.byref(error_flag))
+        if error_flag.value != 0:
+            raise ValueError("Constraint location failed with error code {0:d}".format(error_flag.value))
+        self.projected = []
+        for i, con in enumerate(self.get_constraints()):
+            if loc_mat[i,0] > 0.0:
+                self.projected.append({'index': i, 'constraint': con, 'points': int(loc_mat[i,0]), 'distance': loc_mat[i,1]})
+        if len(self.projected) > 0:
+            oft_warning('{0:d} constraint(s) have evaluation points off the mesh, moved to the nearest boundary node (largest move {1:.3E} m); see `projected`'.format(
+                len(self.projected), max([entry['distance'] for entry in self.projected])))
 
     def destroy_constraints(self):
         '''! Destroy constraints in TokaMaker'''
@@ -779,7 +1123,13 @@ class reconstruction():
         tokamaker_recon_err(self._tMaker_obj._tMaker_ptr,c_bool(vacuum),ctypes.byref(self.settings.get_c_struct(self._tMaker_obj._oft_env)),mat_ptr,ctypes.byref(error_flag))
         if error_flag.value != 0:
             raise ValueError("Error evaluation failed with error code {0:d}".format(error_flag.value))
-        return error_mat if not save_to_file else None
+        if save_to_file:
+            return None
+        bad_rows = numpy.flatnonzero(numpy.logical_not(numpy.isfinite(error_mat[:,1])))
+        if bad_rows.shape[0] > 0:
+            oft_warning('Modeled signal is not finite for constraint row(s) {0} (e.g. an MSE denominator of zero)'.format(
+                bad_rows.tolist()))
+        return error_mat
 
     def setup_get_opt(self,fail_factor=1.E2,pp_target_weight=1.E5,opoint_target_weight=1.E2):
         r'''! Setup object for use with general optimization routines, such as `scipy.optimize.minimize`,

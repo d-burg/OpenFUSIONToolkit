@@ -307,21 +307,22 @@ TYPE(fit_constraint_ptr), POINTER, DIMENSION(:), INTENT(in) :: constraints !< Ne
 CHARACTER(LEN=*), INTENT(in) :: outpath !< Needs docs
 REAL(r8), OPTIONAL, INTENT(inout) :: error_mat(:,:) !< Error matrix
 integer(4) :: i,io_unit
-!---Evaluate errors
+real(8) :: err,model
+!---Evaluate errors (the error and the modeled signal of a constraint come from one evaluation)
 gs_active=>gs
 CALL fit_interp_setup(gs)
 IF(PRESENT(error_mat))THEN
   DO i=1,SIZE(constraints)
-    error_mat(1,i)=constraints(i)%con%error(gs)
-    error_mat(2,i)=constraints(i)%con%eval(gs)
+    error_mat(1,i)=constraints(i)%con%error(gs,model)
+    error_mat(2,i)=model
     error_mat(3,i)=constraints(i)%con%val
     error_mat(4,i)=constraints(i)%con%get_nax(gs)
   END DO
 ELSE
   OPEN(NEWUNIT=io_unit,FILE=TRIM(outpath))
   DO i=1,SIZE(constraints)
-    WRITE(io_unit,'(I8,4ES20.12)')i,constraints(i)%con%error(gs),constraints(i)%con%eval(gs),constraints(i)%con%val, &
-    constraints(i)%con%get_nax(gs)
+    err=constraints(i)%con%error(gs,model)
+    WRITE(io_unit,'(I8,4ES20.12)')i,err,model,constraints(i)%con%val,constraints(i)%con%get_nax(gs)
   END DO
   CLOSE(io_unit)
 END IF
@@ -1350,12 +1351,14 @@ END SUBROUTINE fit_load
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_dummy_error(self,gs) RESULT(err)
+FUNCTION fit_dummy_error(self,gs,model) RESULT(err)
 CLASS(fit_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 CALL oft_abort('No constraint type specified.','fit_dummy_error',__FILE__)
 err=0.d0
+IF(PRESENT(model))model=0.d0
 END FUNCTION fit_dummy_error
 !---------------------------------------------------------------------------------
 !> Needs Docs
@@ -1410,11 +1413,13 @@ END SUBROUTINE fit_destroy
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_coil_error(self,gs) RESULT(err)
+FUNCTION fit_coil_error(self,gs,model) RESULT(err)
 CLASS(coil_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 err = (gs%coil_currs(self%coil)/mu0 - self%val)*self%wt
+IF(PRESENT(model))model=self%eval(gs)
 END FUNCTION fit_coil_error
 !---------------------------------------------------------------------------------
 !> Needs Docs
@@ -1428,11 +1433,15 @@ END FUNCTION fit_coil_eval
 !---------------------------------------------------------------------------------
 !> Compute coil total current constraint error, with the sign of \ref fit_coil_error
 !---------------------------------------------------------------------------------
-FUNCTION fit_coil_total_error(self,gs) RESULT(err)
+FUNCTION fit_coil_total_error(self,gs,model) RESULT(err)
 CLASS(coil_total_constraint), INTENT(inout) :: self !< Constraint
 TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Weighted error (model - value)*weight
-err = (self%eval(gs) - self%val)*self%wt
+REAL(8) :: total
+total = self%eval(gs)
+err = (total - self%val)*self%wt
+IF(PRESENT(model))model=total
 END FUNCTION fit_coil_total_error
 !---------------------------------------------------------------------------------
 !> Evaluate coil total current constraint: the coil's current plus its share of the virtual vertical stability
@@ -1447,11 +1456,13 @@ END FUNCTION fit_coil_total_eval
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_vcont_error(self,gs) RESULT(err)
+FUNCTION fit_vcont_error(self,gs,model) RESULT(err)
 CLASS(vcont_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 err = (gs%vcontrol_val - self%val)*self%wt
+IF(PRESENT(model))model=self%eval(gs)
 END FUNCTION fit_vcont_error
 !---------------------------------------------------------------------------------
 !> Needs Docs
@@ -1465,12 +1476,14 @@ END FUNCTION fit_vcont_eval
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_q_error(self,gs) RESULT(err)
+FUNCTION fit_q_error(self,gs,model) RESULT(err)
 CLASS(q_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 REAL(8) :: qval
 qval = self%eval(gs)
+IF(PRESENT(model))model=qval
 IF(qval<-1.d98)THEN ! Trace failed (-1.d99), skip the constraint
   CALL oft_warn('fit_q_error: q trace failed, constraint skipped')
   err = 0.d0
@@ -1543,11 +1556,13 @@ END FUNCTION fit_q_parallel
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_field_error(self,gs) RESULT(err)
+FUNCTION fit_field_error(self,gs,model) RESULT(err)
 CLASS(field_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 err = self%eval(gs)
+IF(PRESENT(model))model=err
 IF(ASSOCIATED(self%nax_corr))err=err+DOT_PRODUCT(self%nax_corr,gs%device%cond_weights)
 err = (self%val - err)*self%wt
 END FUNCTION fit_field_error
@@ -1751,12 +1766,14 @@ END SUBROUTINE fit_field_setup_comp
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_flux_error(self,gs) RESULT(err)
+FUNCTION fit_flux_error(self,gs,model) RESULT(err)
 CLASS(flux_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 REAL(8) :: psitmp
 psitmp = self%eval(gs)
+IF(PRESENT(model))model=psitmp
 err = (self%val - psitmp)*self%wt
 END FUNCTION fit_flux_error
 !---------------------------------------------------------------------------------
@@ -1788,11 +1805,13 @@ END SUBROUTINE fit_flux_locate
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_saddle_error(self,gs) RESULT(err)
+FUNCTION fit_saddle_error(self,gs,model) RESULT(err)
 CLASS(saddle_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 err = self%eval(gs)
+IF(PRESENT(model))model=err
 IF(ASSOCIATED(self%nax_corr))err=err+DOT_PRODUCT(self%nax_corr,gs%device%cond_weights)
 err = (self%val - err)*self%wt
 END FUNCTION fit_saddle_error
@@ -1851,12 +1870,14 @@ END SUBROUTINE fit_saddle_setup_comp
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_itor_error(self,gs) RESULT(err)
+FUNCTION fit_itor_error(self,gs,model) RESULT(err)
 CLASS(itor_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 REAL(8) :: itor
 itor = self%eval(gs)
+IF(PRESENT(model))model=itor
 err = (self%val - itor)*self%wt
 END FUNCTION fit_itor_error
 !---------------------------------------------------------------------------------
@@ -1881,12 +1902,14 @@ END FUNCTION fit_itor_parallel
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_dflux_error(self,gs) RESULT(err)
+FUNCTION fit_dflux_error(self,gs,model) RESULT(err)
 CLASS(dflux_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present)
 REAL(8) :: err !< Needs docs
 REAL(8) :: dflux
 dflux=self%eval(gs)
+IF(PRESENT(model))model=dflux
 err = (self%val - dflux)*self%wt
 END FUNCTION fit_dflux_error
 !---------------------------------------------------------------------------------
@@ -1901,13 +1924,16 @@ END FUNCTION fit_dflux_eval
 !---------------------------------------------------------------------------------
 !> Needs Docs
 !---------------------------------------------------------------------------------
-FUNCTION fit_press_error(self,gs) RESULT(err)
+FUNCTION fit_press_error(self,gs,model) RESULT(err)
 CLASS(press_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
+REAL(8), OPTIONAL, INTENT(out) :: model !< Modeled signal, the value of `eval` (if present; without the guidance
+!! value used for the error outside the plasma)
 REAL(8) :: err !< Needs docs
 REAL(8) :: press,psi(1),goptmp(3,4)
 LOGICAL :: in_plasma
 press = self%eval(gs)
+IF(PRESENT(model))model=press
 !---Handle outside plasma guidance
 IF(self%r(1)>0.d0)THEN
   CALL fit_interp_check(gs,'fit_press_error')

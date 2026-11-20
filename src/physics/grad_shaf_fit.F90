@@ -264,6 +264,8 @@ LOGICAL, PRIVATE :: fit_F0 = .FALSE. !< Needs docs
 LOGICAL, PRIVATE :: fixed_centering = .FALSE. !< Needs docs
 LOGICAL, PRIVATE :: linearized_fit = .FALSE. !< Needs docs
 TYPE(fit_constraint_ptr), POINTER, DIMENSION(:) :: conlist => NULL() !< Needs docs
+TYPE(oft_lag_brinterp) :: fit_psi_interp !< Flux interpolator shared by all constraint evaluations of one pass
+TYPE(oft_lag_bginterp) :: fit_gpsi_interp !< Flux gradient interpolator sharing the values of \ref fit_psi_interp
 !---
 PUBLIC fit_constraint, field_constraint, itor_constraint, fit_pm
 PUBLIC fit_constraint_ptr, fit_gs, fit_gs_error, fit_load, fit_gs_setup, fit_gs_destroy, fit_gs_locate
@@ -307,6 +309,7 @@ REAL(r8), OPTIONAL, INTENT(inout) :: error_mat(:,:) !< Error matrix
 integer(4) :: i,io_unit
 !---Evaluate errors
 gs_active=>gs
+CALL fit_interp_setup(gs)
 IF(PRESENT(error_mat))THEN
   DO i=1,SIZE(constraints)
     error_mat(1,i)=constraints(i)%con%error(gs)
@@ -322,6 +325,7 @@ ELSE
   END DO
   CLOSE(io_unit)
 END IF
+CALL fit_interp_delete
 END SUBROUTINE fit_gs_error
 !---------------------------------------------------------------------------------
 !> Locate the evaluation points of all constraints in the mesh and report those moved onto the boundary
@@ -575,10 +579,12 @@ ELSE
 END IF
 !---
 OPEN(NEWUNIT=io_unit,FILE=TRIM(outpath))
+CALL fit_interp_setup(gs_active)
 DO i=1,ncons
   WRITE(io_unit,'(I8,4ES20.12)')i,error(i),conlist(i)%con%eval(gs_active),conlist(i)%con%val, &
   conlist(i)%con%get_nax(gs_active)
 END DO
+CALL fit_interp_delete
 CLOSE(io_unit)
 OPEN(NEWUNIT=io_unit,FILE=TRIM(outpath)//'_cofs')
 WRITE(io_unit,*)ncofs
@@ -833,6 +839,7 @@ IF(iflag==1)THEN
   !---
   abs_err=0.d0
   rel_err=0.d0
+  CALL fit_interp_setup(gs_active)
   !$omp parallel do schedule(dynamic,1)
   DO i=1,m
     IF(conlist(i)%con%is_parallel())CYCLE
@@ -845,6 +852,7 @@ IF(iflag==1)THEN
       IF(ABS(conlist(i)%con%val)>1.d-10)rel_err(i)=abs_err(i)/conlist(i)%con%val
     END IF
   END DO
+  CALL fit_interp_delete
   IF(ierr==0)THEN
     IF(SQRT(SUM(err**2))<chi_best)THEN
       chi_best=SQRT(SUM(err**2))
@@ -1151,6 +1159,7 @@ IF(ierr<0)THEN
   END DO
   IF(.NOT.gs_active%device%free)gs_active%ffp_scale=ffp_scalein
 ELSE
+  CALL fit_interp_setup(gs_active) ! Outside the parallel loop: evaluations only read the interpolators
   !$omp parallel do schedule(dynamic,1)
   DO i=1,m
     IF(conlist(i)%con%is_parallel())CYCLE
@@ -1161,6 +1170,7 @@ ELSE
       err(i)=conlist(i)%con%error(gs_active)
     END IF
   END DO
+  CALL fit_interp_delete
 END IF
 END SUBROUTINE run_err
 !---------------------------------------------------------------------------------
@@ -1597,6 +1607,36 @@ IF((MINVAL(f)<-1.d-6).OR.(MAXVAL(f)>1.d0+1.d-6))THEN
 END IF
 END SUBROUTINE fit_locate_point
 !---------------------------------------------------------------------------------
+!> Set up the flux and flux gradient interpolators shared by all constraint evaluations of one pass
+!!
+!! Called outside any parallel region before a pass over the constraints, and paired with
+!! \ref fit_interp_delete after it; \f$ \psi \f$ must not change in between. Evaluations, also from several
+!! threads, only read the interpolators.
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_interp_setup(gs)
+TYPE(gs_equil), INTENT(inout) :: gs !< Equilibrium
+IF(ASSOCIATED(fit_psi_interp%vals))CALL oft_abort('Interpolators already set up','fit_interp_setup',__FILE__)
+fit_psi_interp%u=>gs%psi
+CALL fit_psi_interp%setup(gs%device%fe_rep)
+CALL fit_gpsi_interp%shared_setup(fit_psi_interp)
+END SUBROUTINE fit_interp_setup
+!---------------------------------------------------------------------------------
+!> Delete the interpolators set up by \ref fit_interp_setup
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_interp_delete
+CALL fit_gpsi_interp%delete()
+CALL fit_psi_interp%delete()
+END SUBROUTINE fit_interp_delete
+!---------------------------------------------------------------------------------
+!> Check that the shared interpolators are set up on the flux of `gs`
+!---------------------------------------------------------------------------------
+SUBROUTINE fit_interp_check(gs,caller)
+TYPE(gs_equil), INTENT(in) :: gs !< Equilibrium
+CHARACTER(LEN=*), INTENT(in) :: caller !< Calling routine (for the error message)
+IF(.NOT.ASSOCIATED(fit_psi_interp%u,gs%psi))CALL oft_abort('Interpolators not set up for this equilibrium', &
+  caller,__FILE__)
+END SUBROUTINE fit_interp_check
+!---------------------------------------------------------------------------------
 !> Evaluate the magnetic field \f$ (B_R, B_\phi, B_Z) \f$ at a point already located in the mesh
 !!
 !! The toroidal field uses \f$ F(\psi) \f$ at the point (no in-plasma test), as all field constraints do
@@ -1607,18 +1647,11 @@ INTEGER(4), INTENT(in) :: cell !< Cell containing the point
 REAL(8), INTENT(in) :: f(3) !< Logical coordinates of the point in `cell`
 REAL(8), INTENT(in) :: r(3) !< Location of the point (R, Z, 0)
 REAL(8), INTENT(out) :: btmp(3) !< Field \f$ (B_R, B_\phi, B_Z) \f$ [T]
-TYPE(oft_lag_brinterp) :: psi_eval
-TYPE(oft_lag_bginterp) :: psi_geval
 REAL(8) :: goptmp(3,3),v,psi(1),gpsi(3)
-psi_eval%u=>gs%psi
-CALL psi_eval%setup(gs%device%fe_rep)
-psi_geval%u=>gs%psi
-CALL psi_geval%setup(gs%device%fe_rep)
+CALL fit_interp_check(gs,'fit_bvec_eval')
 CALL gs%device%mesh%jacobian(cell,f,goptmp,v)
-CALL psi_eval%interp(cell,f,goptmp,psi)
-CALL psi_geval%interp(cell,f,goptmp,gpsi)
-CALL psi_eval%delete()
-CALL psi_geval%delete()
+CALL fit_psi_interp%interp(cell,f,goptmp,psi)
+CALL fit_gpsi_interp%interp(cell,f,goptmp,gpsi)
 btmp(1)= -gs%psiscale*gpsi(2)/r(1)
 IF(gs%mode==0)THEN
   btmp(2)= gs%psiscale*(gs%ffp_scale*gs%I%f(psi(1))+gs%I%f_offset)/r(1)
@@ -1733,17 +1766,14 @@ FUNCTION fit_flux_eval(self,gs) RESULT(val)
 CLASS(flux_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
-TYPE(oft_lag_brinterp) :: psi_eval
 REAL(8) :: goptmp(3,3),v,psi(1)
 CLASS(oft_bmesh), POINTER :: smesh
 smesh=>gs%device%mesh
 IF(self%cell==0)CALL fit_locate_point(smesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 !---
-psi_eval%u=>gs%psi
-CALL psi_eval%setup(gs%device%fe_rep)
+CALL fit_interp_check(gs,'fit_flux_eval')
 call smesh%jacobian(self%cell,self%f,goptmp,v)
-call psi_eval%interp(self%cell,self%f,goptmp,psi)
-CALL psi_eval%delete()
+call fit_psi_interp%interp(self%cell,self%f,goptmp,psi)
 !---
 val = psi(1)*2.d0*pi
 END FUNCTION fit_flux_eval
@@ -1773,7 +1803,6 @@ FUNCTION fit_saddle_eval(self,gs) RESULT(val)
 CLASS(saddle_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
-TYPE(oft_lag_brinterp) :: psi_eval
 REAL(8) :: goptmp(3,3),psi(1,2)
 INTEGER(4) :: i
 IF(self%cells(1)==0)THEN
@@ -1785,12 +1814,10 @@ IF(self%cells(1)==0)THEN
   END DO
 END IF
 !---
-psi_eval%u=>gs%psi
-CALL psi_eval%setup(gs%device%fe_rep)
+CALL fit_interp_check(gs,'fit_saddle_eval')
 DO i=1,2
-  call psi_eval%interp(self%cells(i),self%f(:,i),goptmp,psi(:,i))
+  call fit_psi_interp%interp(self%cells(i),self%f(:,i),goptmp,psi(:,i))
 END DO
-CALL psi_eval%delete
 !---
 val = -(psi(1,1)-psi(1,2))*self%width
 END FUNCTION fit_saddle_eval
@@ -1879,14 +1906,12 @@ CLASS(press_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: err !< Needs docs
 REAL(8) :: press,psi(1),goptmp(3,4)
-TYPE(oft_lag_brinterp) :: psi_eval
 LOGICAL :: in_plasma
 press = self%eval(gs)
 !---Handle outside plasma guidance
 IF(self%r(1)>0.d0)THEN
-  psi_eval%u=>gs%psi
-  CALL psi_eval%setup(gs%device%fe_rep)
-  call psi_eval%interp(self%cell,self%f,goptmp,psi)
+  CALL fit_interp_check(gs,'fit_press_error')
+  call fit_psi_interp%interp(self%cell,self%f,goptmp,psi)
   in_plasma=.TRUE.
   IF(gs_test_bounds(gs,self%r))THEN
     IF(psi(1)<=gs%plasma_bounds(1))in_plasma=.FALSE.
@@ -1897,7 +1922,6 @@ IF(self%r(1)>0.d0)THEN
     err=gs%psiscale*gs%psiscale*gs%p_scale*gs%P%f(gs%plasma_bounds(2))/mu0/(gs%plasma_bounds(2)-gs%plasma_bounds(1))
     press=err*(psi(1)-gs%plasma_bounds(1))
   END IF
-  CALL psi_eval%delete()
 END IF
 err = (self%val - press)*self%wt
 END FUNCTION fit_press_error
@@ -1908,7 +1932,6 @@ FUNCTION fit_press_eval(self,gs) RESULT(val)
 CLASS(press_constraint), INTENT(inout) :: self !< Needs docs
 TYPE(gs_equil), INTENT(inout) :: gs !< Needs docs
 REAL(8) :: val !< Needs docs
-TYPE(oft_lag_brinterp) :: psi_eval
 REAL(8) :: goptmp(3,3),v,psi(1)
 CLASS(oft_bmesh), POINTER :: smesh
 smesh=>gs%device%mesh
@@ -1918,11 +1941,9 @@ IF(self%r(1)<0.d0)THEN ! Magnetic axis pressure constraint
 END IF
 IF(self%cell==0)CALL fit_locate_point(smesh,self%r,self%cell,self%f,self%nproj,self%proj_dist)
 !---
-psi_eval%u=>gs%psi
-CALL psi_eval%setup(gs%device%fe_rep)
+CALL fit_interp_check(gs,'fit_press_eval')
 call smesh%jacobian(self%cell,self%f,goptmp,v)
-call psi_eval%interp(self%cell,self%f,goptmp,psi)
-CALL psi_eval%delete
+call fit_psi_interp%interp(self%cell,self%f,goptmp,psi)
 !---
 val = gs%psiscale*gs%psiscale*gs%p_scale*gs%P%f(psi(1))/mu0
 END FUNCTION fit_press_eval

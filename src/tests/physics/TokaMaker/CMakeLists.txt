@@ -52,7 +52,6 @@ configure_file( test_TokaMaker_kinetic_sawtooth_operator.py ${CMAKE_CURRENT_BINA
 configure_file( test_TokaMaker_kinetic_sawtooth_cycle.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_sawtooth_frame.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_sawtooth_schedule.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
-configure_file( test_TokaMaker_kinetic_redl_jdotb.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_current_model_inputs.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_current_model_corrections.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_current_model_pass_loop.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

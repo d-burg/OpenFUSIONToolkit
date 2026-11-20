@@ -133,7 +133,7 @@ def coulomb_log_e(ne, te_ev, model="sauter"):
 def coulomb_log_ii(ni, ti_ev, z):
     r"""Ion-ion Coulomb logarithm ``ln(Lambda_ii) = 30 - ln(Z^3 sqrt(n_i) / Ti^1.5)`` (Sauter 1999 eq. 18e, the
     definition Redl 2021 section III.D requires with eqs. 18a-18d), ``n_i`` in m^-3, ``Ti`` in eV, ``Z`` the ion
-    charge used in it (the caller's convention, e.g. :mod:`._jdotb_redl`).  No floor is applied (as
+    charge used in it (the caller's convention, e.g. :mod:`.bootstrap`).  No floor is applied (as
     :func:`coulomb_log_e`)."""
     ni = np.asarray(ni, dtype=float)
     ti = np.asarray(ti_ev, dtype=float)

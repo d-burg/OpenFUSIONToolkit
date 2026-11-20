@@ -3,3 +3,5 @@ foreach(SOURCE_FILE IN LISTS MY_SOURCES)
   configure_file( ${SOURCE_FILE} ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
   install(FILES ${SOURCE_FILE} DESTINATION python/OpenFUSIONToolkit/TokaMaker COMPONENT app)
 endforeach()
+
+add_subdirectory( sources )

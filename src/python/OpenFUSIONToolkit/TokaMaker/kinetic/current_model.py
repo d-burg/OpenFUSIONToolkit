@@ -591,7 +591,7 @@ def correction_shapes(lag, cfg, ip, form="steady"):
         raise ValueError("form must be 'steady' or 'in_window'")
     geom, layer = lag["geom"], lag["layer"]
     rmap = lag["rho_map"]
-    ge, rho_ge = lag["phys"]["psi_n"], lag["phys"]["rho"]
+    ge, rho_ge = lag["phys"]["psi_n"], lag["phys"]["rho"]  # noqa: F841
     gc = geom.evaluate(geom.rho, ["dvol_drho", "fpol"])
     rho_std_g = geom.rho * rmap.rho_edge
     rho_l = rmap.rho_of_psin(layer.psi_n)
@@ -703,7 +703,7 @@ def carried_outside_core_parts(lag, cfg, ip, r_core, taper_width, rho_faces):
         core.append((1.0 - w_ge) * g)
 
         def gauss(x, wid):
-            return np.exp(-0.5 * ((np.asarray(x, float) - c0) / wid) ** 2)
+            return np.exp(-0.5 * ((np.asarray(x, float) - c0) / wid) ** 2)  # noqa: B023 (used in this iteration)
 
         m1 = float(np.sum(vfac * w_c * gauss(rc_std, s)) + layer.integral(layer.source_density(w_l * gauss(rl, s))))
         m2 = float(np.sum(vfac * w_c * gauss(rc_std, r * s))

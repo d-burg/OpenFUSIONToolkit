@@ -449,7 +449,7 @@ class FluxSurfaceGeometry:
         r[0], r[-1] = 0.0, a
         for k in range(1, n - 1):
             target = phi_b * rho[k] ** 2
-            r[k] = brentq(lambda x: phi_of_r(x) - target, 0.0, a, xtol=1e-15 * a, rtol=1e-15)
+            r[k] = brentq(lambda x: phi_of_r(x) - target, 0.0, a, xtol=1e-15 * a, rtol=1e-15)  # noqa: B023
         s = np.sqrt(R0 ** 2 - r ** 2)
         f_r = np.asarray(fpol(r / a), dtype=float) * np.ones(n)
         # drho/dr = (dPhi/dr) / (2 rho Phi_b); on axis the limit is sqrt(pi F(0) / (R0 Phi_b)).

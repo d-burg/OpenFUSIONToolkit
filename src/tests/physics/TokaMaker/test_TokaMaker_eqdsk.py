@@ -242,6 +242,27 @@ def test_eqdsk_save_load_roundtrip(tmp_path):
                            rtol=1e-6, atol=1e-10), key
 
 
+def test_eqdsk_write_exponent_range(tmp_path):
+    '''write_geqdsk writes values below 1E-99 in magnitude as zero (as the Fortran writer does), so every field
+    keeps 16 characters and the file reads back; a value too large for the field raises ValueError'''
+    from OpenFUSIONToolkit.TokaMaker.eqdsk import read_geqdsk, write_geqdsk
+    raw = dict(read_geqdsk(os.path.join(test_dir, 'ITER_test.eqdsk'))._raw)
+    raw['PRES'] = np.array(raw['PRES'])
+    raw['FPOL'] = np.array(raw['FPOL'])
+    raw['PRES'][3] = 1.0E-120
+    raw['FPOL'][2] = -2.5E-101
+    write_geqdsk(raw, str(tmp_path / 'tiny.geqdsk'))
+    raw_rt = read_geqdsk(str(tmp_path / 'tiny.geqdsk'))._raw
+    assert raw_rt['PRES'][3] == 0.0 and raw_rt['FPOL'][2] == 0.0
+    # The other values are reproduced to the 10 significant digits of the field
+    for key in ('FPOL', 'PRES', 'PSIRZ', 'QPSI'):
+        assert np.allclose(raw[key], raw_rt[key], rtol=1e-9, atol=1e-99), key
+    raw['QPSI'] = np.array(raw['QPSI'])
+    raw['QPSI'][0] = 1.0E120
+    with pytest.raises(ValueError):
+        write_geqdsk(raw, str(tmp_path / 'huge.geqdsk'))
+
+
 def test_eqdsk_cocos_bytes_roundtrip():
     '''Serializing a gEQDSK equilibrium to bytes and back reproduces the data'''
     from OpenFUSIONToolkit.TokaMaker.eqdsk import read_geqdsk, GEQDSKEquilibrium

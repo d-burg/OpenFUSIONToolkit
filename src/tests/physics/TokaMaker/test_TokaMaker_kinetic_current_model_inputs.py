@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from OpenFUSIONToolkit.TokaMaker.kinetic._jdotb_redl import EC
-from OpenFUSIONToolkit.TokaMaker.kinetic.current_model import KineticProfiles, SourceProfiles, full_params
+from OpenFUSIONToolkit.TokaMaker.kinetic.current_model import KineticProfiles, SourceProfiles, full_params, ip_target
 
 
 def _kin(**kw):
@@ -67,3 +67,11 @@ def test_source_forms_and_conversions():
 def test_parameter_defaults():
     p = full_params({"s_bs": 1.2})
     assert p["s_bs"] == 1.2 and p["log_strength"] is None and p["f"] == 0.37 and p["a_corr"] == (0.0, 0.0, 0.0)
+
+
+def test_ip_target_is_the_magnitude_times_one_plus_ip_rel():
+    """New in this package (not in the original tests; a deliberate bug that flipped the sign of ``ip_rel`` passed
+    them all): the forward solve's Ip target is ``|base_ip| (1 + ip_rel)``, ``ip_rel`` = 0 by default."""
+    assert ip_target(1.2e6, {}) == 1.2e6 and ip_target(-1.2e6, None) == 1.2e6
+    assert ip_target(1.2e6, {"ip_rel": 0.01}) == pytest.approx(1.212e6, rel=1e-15)
+    assert ip_target(-1.2e6, {"ip_rel": -0.02}) == pytest.approx(1.176e6, rel=1e-15)

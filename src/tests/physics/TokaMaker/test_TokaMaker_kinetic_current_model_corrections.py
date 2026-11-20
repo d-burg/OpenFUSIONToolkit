@@ -282,3 +282,20 @@ def test_axis_flag_from_mid_and_outer_corrections_only_with_the_conductivity_ret
     assert not any("axis <J.B>" in f for f in lo["flags"]), lo["flags"]
     for r in rec.values():
         assert sum("prior sigmas" in f for f in r["flags"]) == 2
+
+
+def test_bootstrap_multiplier_scales_the_bootstrap_source():
+    """New in this package (not in the original tests; a deliberate bug that ignored ``s_bs`` passed them all): with
+    the core treatment off, the state and <J_phi> assembled with ``s_bs = s`` are, bit for bit, those assembled from
+    the fixture with its bootstrap current multiplied by ``s`` beforehand, and differ from the ``s_bs = 1`` ones."""
+    lag, kin, src = _fixture_inputs()
+    cfg = CM.CurrentModelSettings(r0=GEO.R0, core_relaxation="none")
+    base = CM.assemble(lag, kin, src, {}, cfg, GEO.IP)
+    for s in (0.0, 0.5, 2.0):
+        a = CM.assemble(lag, kin, src, dict(s_bs=s), cfg, GEO.IP)
+        lag_s, _, _ = _fixture_inputs()
+        lag_s["jbs"] = s * lag_s["jbs"]
+        ref = CM.assemble(lag_s, kin, src, {}, cfg, GEO.IP)
+        np.testing.assert_array_equal(a["state"].psi, ref["state"].psi)
+        np.testing.assert_array_equal(a["jphi"], ref["jphi"])
+        assert np.max(np.abs(a["state"].psi - base["state"].psi)) > 0.0

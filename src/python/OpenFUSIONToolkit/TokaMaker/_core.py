@@ -122,6 +122,10 @@ def create_prof_file(self, filename, profile_dict, name):
 
 
 ## Bootstrap options and their defaults (as in the Fortran `boot_ops` type); value types set the conversions
+## Geometry keys of @ref TokaMaker.TokaMaker_equilibrium.eval_bootstrap "eval_bootstrap", in the order of the
+## wrapper's `geom` rows
+_EVAL_BOOT_GEOM_KEYS = ('eps', 'R_geo', 'q', '<R>', '<1/R>', '<1/R^2>', '<|B|>', '<|B|^2>')
+
 _BOOT_OPS_DEFAULTS = {
     'isolate_edge_jbs': False,
     'scale_jbs': 1.0,
@@ -136,7 +140,28 @@ _BOOT_OPS_DEFAULTS = {
     'saw_relax': 1.0,
     'saw_ramp': 0.01,
     'saw_rule': 2,
+    'ln_lambda_model': 1,
+    'imp_pressure': False,
+    'bs_model': 1,
+    'ion_charge_model': 1,
 }
+
+
+def _check_boot_models(ln_lambda_model, imp_pressure, bs_model, ion_charge_model):
+    '''! Check the bootstrap model options (not converted: 2.7 or the string "False" are rejected)
+
+    @param ln_lambda_model Coulomb logarithms, the integer 1 or 2
+    @param imp_pressure Count the impurity in the ion pressure, a bool
+    @param bs_model Bootstrap coefficients, the integer 1 or 2
+    @param ion_charge_model Ion charge in the ion collisionality and Coulomb logarithm, the integer 1 or 2
+    '''
+    for name, val, models in (('ln_lambda_model', ln_lambda_model, '1 (NRL) or 2 (Sauter 1999)'),
+                              ('bs_model', bs_model, '1 (Redl 2021) or 2 (Sauter 1999)'),
+                              ('ion_charge_model', ion_charge_model, '1 (Koh form) or 2 (main-ion charge)')):
+        if isinstance(val, (bool, numpy.bool_)) or not isinstance(val, (int, numpy.integer)) or val not in (1, 2):
+            raise ValueError(f"{name} must be the integer {models}")
+    if not isinstance(imp_pressure, (bool, numpy.bool_)):
+        raise ValueError("imp_pressure must be a bool")
 
 
 ## Keyword inputs of @ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap" kept between calls and in saved files
@@ -1106,7 +1131,8 @@ class TokaMaker():
 
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
-                     saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None):
+                     saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
+                     ln_lambda_model=None, imp_pressure=None, bs_model=None, ion_charge_model=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update
 
         See @ref TokaMaker.TokaMaker_equilibrium.set_boot_ops "set_boot_ops"
@@ -1116,7 +1142,8 @@ class TokaMaker():
         return self._tMaker_equil.set_boot_ops(isolate_edge_jbs, scale_jbs, djbs_tol,
                                                diagnose_bs,
                                                taper_edge_jphi, taper_edge_psi0, taper_edge_shape,
-                                               saw_q_s, saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule)
+                                               saw_q_s, saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule,
+                                               ln_lambda_model, imp_pressure, bs_model, ion_charge_model)
 
     def get_boot_profs(self):
         r'''! Get the current profiles of the last G-S solve with a `jphi-split-bootstrap` current profile
@@ -2626,6 +2653,11 @@ class TokaMaker():
           \f$\alpha j_{ind} + j_{BS} + j_{fixed} + j_{saw,in}\f$ in the traced geometry is reset where it dips
           below q_s (``saw_rule``); the Ip-neutral current that does this is added to ``jphi_saw``
         @param saw_dq, saw_tol, saw_relax, saw_ramp, saw_rule See ``set_boot_ops()``
+        @param ln_lambda_model, imp_pressure Coulomb logarithms and impurity ion pressure of the bootstrap
+          current, see ``set_boot_ops()`` (defaults: 1 = NRL, False)
+        @param bs_model Bootstrap coefficients, see ``set_boot_ops()`` (default: 1 = Redl 2021)
+        @param ion_charge_model Ion charge in \f$\nu_{i*}\f$ and \f$\ln\Lambda_{ii}\f$, see ``set_boot_ops()``
+          (default: 1)
 
         @result Dictionary with 1-D numpy array values (A/m^2 unless noted). All current densities, inputs
           included, are TokaMaker \f$j_\phi = \langle j_\phi \rangle = \langle R \rangle P' + \langle 1/R \rangle FF'/\mu_0\f$
@@ -2788,6 +2820,17 @@ class TokaMaker():
 
         # Extract bootstrap profiles
         return self.get_boot_profs()
+
+    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None,
+                       bs_model=None, ion_charge_model=None):
+        r'''! Evaluate the bootstrap current of @ref solve_bootstrap on the current equilibrium, without solving
+
+        See @ref TokaMaker.TokaMaker_equilibrium.eval_bootstrap "eval_bootstrap"
+        '''
+        if self._tMaker_equil is None:
+            raise ValueError("Equilibrium object is `None`")
+        return self._tMaker_equil.eval_bootstrap(psi, te, ti, ne, ni, Zeff, nimp, ln_lambda_model, imp_pressure,
+                                                 bs_model, ion_charge_model)
 
 class TokaMaker_equilibrium():
     '''! TokaMaker G-S equilibrium class'''
@@ -3265,7 +3308,8 @@ class TokaMaker_equilibrium():
 
     def set_boot_ops(self, isolate_edge_jbs=None, scale_jbs=None, djbs_tol=None,
                      diagnose_bs=None, taper_edge_jphi=None, taper_edge_psi0=None, taper_edge_shape=None,
-                     saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None):
+                     saw_q_s=None, saw_dq=None, saw_tol=None, saw_relax=None, saw_ramp=None, saw_rule=None,
+                     ln_lambda_model=None, imp_pressure=None, bs_model=None, ion_charge_model=None):
         r'''! Set bootstrap current options for the jphi-split-bootstrap current profile update.
 
         Call after setting a `jphi-split-bootstrap`-type ffp_prof profile, and before mygs.solve().
@@ -3285,14 +3329,36 @@ class TokaMaker_equilibrium():
         @param saw_ramp Reset weight ramps over this q deficit below saw_q_s; 0 = hard trigger. (Internal default: 0.01)
         @param saw_rule Reset rule: 1 = fuse (FUSE's saw_crash!: q reset from the axis out to the sawtooth radius);
           2 = local (each dip below saw_q_s raised about its q minimum, current moved only inside it). (Internal default: 2)
+        @param ln_lambda_model Coulomb logarithms in the collisionalities: 1 = NRL formulary electron form and
+          the ion form of Sauter 1999 eq. 18e with the \f$Z\f$ of `ion_charge_model` (default \f$\max(n_e/n_i, 1)\f$),
+          both floored at 10; 2 = Sauter 1999 eqs. 18d and 18e (the same Z), no floor (see @ref eval_bootstrap).
+          (Internal default: 1)
+        @param imp_pressure Count the impurity in the ion pressure and its gradient, \f$(n_i + n_{imp}) T_i\f$, with
+          \f$n_{imp} = (n_e - n_i)^2/(Z_{eff} n_e - n_i)\f$, the one impurity species that with main ions of charge 1
+          gives quasineutrality and \f$Z_{eff}\f$ (zero where \f$n_i \geq n_e\f$ or \f$Z_{eff} n_e \leq n_i\f$).
+          (Internal default: False)
+        @param bs_model Bootstrap coefficients \f$L_{31}, L_{32}, L_{34}, \alpha\f$ in the same `jboot1` form: 1 = Redl
+          et al. 2021 (\f$L_{34} = L_{31}\f$); 2 = Sauter et al. 1999 with the sign of the 2002 erratum (see
+          `bootstrap.redl_bootstrap`, `coefficient_model`). (Internal default: 1)
+        @param ion_charge_model Ion charge \f$Z\f$ in \f$\nu_{i*}\f$ (as \f$Z^4\f$) and in \f$\ln\Lambda_{ii}\f$: 1 = the
+          Koh multi-species form, \f$Z^4 = (n_e/n_i) Z_{eff}\f$ and \f$Z = \max(n_e/n_i, 1)\f$; 2 = the main-ion charge in
+          both, as the 2002 erratum of Sauter 1999 prescribes for eqs. 18c and 18e (the main ions have charge 1).
+          `bs_model=2, ln_lambda_model=2, ion_charge_model=2` is the published Sauter 1999 model. (Internal default: 1)
         '''
+        ops = _BOOT_OPS_DEFAULTS if self._boot_ops is None else self._boot_ops
+        _check_boot_models(ops['ln_lambda_model'] if ln_lambda_model is None else ln_lambda_model,
+                           ops['imp_pressure'] if imp_pressure is None else imp_pressure,
+                           ops['bs_model'] if bs_model is None else bs_model,
+                           ops['ion_charge_model'] if ion_charge_model is None else ion_charge_model)
         if self._boot_ops is None:
             self._boot_ops = dict(_BOOT_OPS_DEFAULTS)
         for key, val in (('isolate_edge_jbs', isolate_edge_jbs), ('scale_jbs', scale_jbs), ('djbs_tol', djbs_tol),
                          ('diagnose_bs', diagnose_bs), ('taper_edge_jphi', taper_edge_jphi),
                          ('taper_edge_psi0', taper_edge_psi0), ('taper_edge_shape', taper_edge_shape),
                          ('saw_q_s', saw_q_s), ('saw_dq', saw_dq), ('saw_tol', saw_tol), ('saw_relax', saw_relax),
-                         ('saw_ramp', saw_ramp), ('saw_rule', saw_rule)):
+                         ('saw_ramp', saw_ramp), ('saw_rule', saw_rule),
+                         ('ln_lambda_model', ln_lambda_model), ('imp_pressure', imp_pressure),
+                         ('bs_model', bs_model), ('ion_charge_model', ion_charge_model)):
             if val is not None:
                 self._boot_ops[key] = type(_BOOT_OPS_DEFAULTS[key])(val)
         if self._boot_ops['saw_q_s'] < 0.0 or self._boot_ops['saw_dq'] <= 0.0 or not (0.0 < self._boot_ops['saw_relax'] <= 1.0) \
@@ -3344,6 +3410,107 @@ class TokaMaker_equilibrium():
                 if isinstance(result[key], numpy.ndarray):
                     result[key] = result[key][::-1].copy()
         return result if result else None
+
+    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None,
+                       bs_model=None, ion_charge_model=None):
+        r'''! Evaluate the bootstrap current of the internal solver on the current equilibrium, without solving
+
+        This is the evaluation that @ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap" makes at each
+        nonlinear iteration (the same code; Redl et al., Phys. Plasmas 28, 022502 (2021), or Sauter et al.,
+        Phys. Plasmas 6, 2834 (1999), see doc_tokamaker_current_conventions), with the geometry of the current
+        equilibrium and its \f$P'\f$
+        for the pressure-driven part. Gradients of the kinetic profiles are taken on `psi`, leaving out a
+        point on the LCFS, where the values are extrapolated (as on the axis). Neither the equilibrium nor
+        the bootstrap options and profiles of the last solve are changed.
+
+        The pressure-driven part uses the equilibrium's own \f$P'\f$ (`p_scale`), the solve the pressure target;
+        the two are equal after a bootstrap solve. It comes from the equilibrium's pressure, while `<j.B>` comes
+        from the given kinetic profiles: with profiles inconsistent with the equilibrium the result mixes the two.
+        A `ValueError` is raised before the evaluation if an input is not finite, or if on the nodes that are used
+        (all but a point on the LCFS) `te`, `ti`, `ne` or `ni` is not positive, `Zeff < 1` or `nimp < 0`.
+
+        @param psi Normalized poloidal flux \f$\hat{\psi}\f$ of the flux surfaces (finite, strictly increasing, in
+          [0,1], at least 3 points strictly between the axis and the LCFS)
+        @param te Electron temperature [keV] on `psi`
+        @param ti Ion temperature [keV] on `psi`
+        @param ne Electron density [m^-3] on `psi`
+        @param ni Main-ion density [m^-3] on `psi`
+        @param Zeff Effective charge (scalar or on `psi`)
+        @param nimp Impurity density [m^-3] on `psi`, counted in the ion pressure (at \f$T_i\f$) in place of the
+          density of `imp_pressure` (not with `imp_pressure=False`)
+        @param ln_lambda_model Coulomb logarithms, 1 or 2 (see @ref set_boot_ops; default: the value set for the
+          solve, else 1)
+        @param imp_pressure Count the impurity density of @ref set_boot_ops in the ion pressure (default: the value
+          set for the solve, else False)
+        @param bs_model Bootstrap coefficients, 1 (Redl 2021) or 2 (Sauter 1999) (see @ref set_boot_ops; default:
+          the value set for the solve, else 1)
+        @param ion_charge_model Ion charge in \f$\nu_{i*}\f$ and \f$\ln\Lambda_{ii}\f$, 1 (Koh form) or 2 (main-ion
+          charge) (see @ref set_boot_ops; default: the value set for the solve, else 1)
+        @result Dictionary of 1-D numpy arrays on `psi`: `'psi_n'`; `'jdotB_bs_raw'`, `'jphi_bs_raw'` and
+          `'jphi_pd_raw'` as in @ref get_boot_profs; `'f_t'` (trapped fraction), `'nu_e_star'` and `'nu_i_star'`
+          (collisionalities), which are NaN on the LCFS (not evaluated) and, on an axis node, their limits
+          \f$f_t = 0\f$ and \f$\nu_* = \infty\f$; and the geometry of the evaluation's flux-surface pass, the one
+          @ref TokaMaker.TokaMaker_equilibrium.calc_sauter_fc "calc_sauter_fc" makes on the same points (its values,
+          so a separate call is not needed): `'eps'` (inverse aspect ratio
+          \f$(R_{\max}-R_{\min})/(R_{\max}+R_{\min})\f$), `'R_geo'` (\f$(R_{\max}+R_{\min})/2\f$ [m]), `'q'` (signed as
+          by @ref TokaMaker.TokaMaker_equilibrium.get_q "get_q"), `'<R>'`, `'<1/R>'`, `'<1/R^2>'`, `'<|B|>'`,
+          `'<|B|^2>'`, also NaN on the LCFS and, on an axis node, the pass's limits (q of the next surface)
+        '''
+        psi = numpy.asarray(psi, dtype=numpy.float64)
+        if (psi.ndim != 1) or (psi.size < 4) or (not numpy.all(numpy.isfinite(psi))) \
+                or numpy.any(numpy.diff(psi) <= 0.0) or (psi[0] < 0.0) or (psi[-1] > 1.0):
+            raise ValueError("psi must be 1D, finite, strictly increasing, in [0,1], with at least 4 points")
+        n = psi.size
+        if (nimp is not None) and (imp_pressure is not None) and (not imp_pressure):
+            raise ValueError("nimp is counted in the ion pressure: it cannot be given with imp_pressure=False")
+        ops = _BOOT_OPS_DEFAULTS if self._boot_ops is None else self._boot_ops
+        ln_lambda_model = ops['ln_lambda_model'] if ln_lambda_model is None else ln_lambda_model
+        imp_pressure = ops['imp_pressure'] if imp_pressure is None else imp_pressure
+        bs_model = ops['bs_model'] if bs_model is None else bs_model
+        ion_charge_model = ops['ion_charge_model'] if ion_charge_model is None else ion_charge_model
+        _check_boot_models(ln_lambda_model, imp_pressure, bs_model, ion_charge_model)
+        imp_mode = 2 if nimp is not None else (1 if imp_pressure else 0)
+        # Fortran nodes: OFT convention (0 = LCFS), increasing
+        flip = slice(None, None, -1) if self.psi_convention == 0 else slice(None)
+        psi_c = numpy.ascontiguousarray(1.0 - psi[flip] if self.psi_convention == 0 else psi)
+        if numpy.count_nonzero((psi_c > 0.0) & (psi_c < 1.0)) < 3:
+            raise ValueError("psi must have at least 3 points strictly between the axis and the LCFS")
+        profs = {}
+        for name, vals in (('te', te), ('ti', ti), ('ne', ne), ('ni', ni), ('Zeff', Zeff),
+                           ('nimp', numpy.zeros(n) if nimp is None else nimp)):
+            vals = numpy.asarray(vals, dtype=numpy.float64)
+            if (vals.ndim == 0) and (name == 'Zeff'):
+                vals = numpy.full(n, float(vals))
+            if vals.shape != (n,):
+                raise ValueError(f"{name} must be on psi (shape {psi.shape}; only Zeff may be a scalar)")
+            if not numpy.all(numpy.isfinite(vals)):
+                raise ValueError(f"{name} must be finite")
+            profs[name] = numpy.ascontiguousarray(vals[flip])
+        # Physical values on the nodes that are used (a point on the LCFS is not)
+        used = slice(1, None) if psi_c[0] == 0.0 else slice(None)
+        for name, low, strict in (('te', 0.0, True), ('ti', 0.0, True), ('ne', 0.0, True), ('ni', 0.0, True),
+                                  ('Zeff', 1.0, False), ('nimp', 0.0, False)):
+            vals = profs[name][used]
+            if numpy.any((vals <= low) if strict else (vals < low)):
+                raise ValueError(f"{name} must be {'>' if strict else '>='} {low:g} on the nodes used (all but a point"
+                                 f" on the LCFS); its minimum there is {vals.min():.6g}")
+        profs = [profs[name] for name in ('te', 'ti', 'ne', 'ni', 'Zeff', 'nimp')]
+        out = numpy.zeros((6, n), dtype=numpy.float64)
+        geom = numpy.zeros((8, n), dtype=numpy.float64)
+        error_string = self._oft_env.get_c_errorbuff()
+        tokamaker_eval_bootstrap(self.c_ptr, n, psi_c, *profs, int(ln_lambda_model), imp_mode, int(bs_model),
+                                 int(ion_charge_model), out, geom, error_string)
+        if error_string.value != b'':
+            raise Exception(error_string.value)
+        if psi_c[0] == 0.0:
+            out[3:, 0] = numpy.nan # Not evaluated on the LCFS
+            geom[:, 0] = numpy.nan
+        result = {'psi_n': psi.copy()}
+        for k, key in enumerate(('jdotB_bs_raw', 'jphi_bs_raw', 'jphi_pd_raw', 'f_t', 'nu_e_star', 'nu_i_star')):
+            result[key] = out[k, flip].copy()
+        for k, key in enumerate(_EVAL_BOOT_GEOM_KEYS):
+            result[key] = geom[k, flip].copy()
+        return result
 
     def set_resistivity(self, eta_prof=None):
         r'''! Set flux function profile $\eta$ using a piecewise linear definition

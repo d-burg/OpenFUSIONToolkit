@@ -47,6 +47,10 @@ TYPE :: boot_ops
   REAL(r8) :: saw_relax = 1.0_r8 !< Under-relaxation of the jphi_saw update (1 = none)
   REAL(r8) :: saw_ramp = 0.01_r8 !< Reset weight ramps over this q deficit below saw_q_s (0 = hard trigger)
   INTEGER(i4) :: saw_rule = 2 !< Reset rule: 1 = fuse (axis to rho_m, FUSE saw_crash!), 2 = local (each dip, two-sided)
+  INTEGER(i4) :: ln_lambda_model = 1 !< Coulomb logarithms: 1 = NRL (floored at 10), 2 = Sauter 1999 eqs. 18d-18e (see @ref bootstrap_eval)
+  LOGICAL :: imp_pressure = .FALSE. !< Count the impurity density of @ref imp_density in the ion pressure
+  INTEGER(i4) :: bs_model = 1 !< Bootstrap coefficients: 1 = Redl 2021, 2 = Sauter 1999 with its 2002 erratum (see @ref redl_bootstrap)
+  INTEGER(i4) :: ion_charge_model = 1 !< Ion charge in nu_i*, ln Lambda_ii: 1 = Koh form, 2 = main-ion charge (see @ref bootstrap_eval)
 END TYPE boot_ops
 !------------------------------------------------------------------------------
 !> Current profiles of the last @ref jphi_bs_update (diagnostics; the update itself uses its own
@@ -156,6 +160,10 @@ IF(self%boot_ops%initialized)THEN
   CALL hdf5_write(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX')
   CALL hdf5_write(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP')
   CALL hdf5_write(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE')
+  CALL hdf5_write(self%boot_ops%ln_lambda_model,filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL')
+  CALL hdf5_write(MERGE(1_i4, 0_i4, self%boot_ops%imp_pressure),filename,path//'/BOOT_OPS/IMP_PRESSURE')
+  CALL hdf5_write(self%boot_ops%bs_model,filename,path//'/BOOT_OPS/BS_MODEL')
+  CALL hdf5_write(self%boot_ops%ion_charge_model,filename,path//'/BOOT_OPS/ION_CHARGE_MODEL')
 END IF
 CALL boot_profs_save(self%boot_profs,filename,path//'/BOOT_PROFS')
 END SUBROUTINE jphi_bs_save_hdf5
@@ -227,6 +235,31 @@ IF(hdf5_field_exist(filename,path//'/BOOT_OPS'))THEN
     CALL hdf5_read(self%boot_ops%saw_relax,filename,path//'/BOOT_OPS/SAW_RELAX',success=success)
     CALL hdf5_read(self%boot_ops%saw_ramp,filename,path//'/BOOT_OPS/SAW_RAMP',success=success)
     CALL hdf5_read(self%boot_ops%saw_rule,filename,path//'/BOOT_OPS/SAW_RULE',success=success)
+  END IF
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL'))THEN
+    CALL hdf5_read(self%boot_ops%ln_lambda_model,filename,path//'/BOOT_OPS/LN_LAMBDA_MODEL',success=success)
+    IF((self%boot_ops%ln_lambda_model /= 1).AND.(self%boot_ops%ln_lambda_model /= 2))THEN
+      CALL oft_warn('jphi_bs_load: invalid "ln_lambda_model" in file, using 1 (NRL)')
+      self%boot_ops%ln_lambda_model = 1
+    END IF
+    CALL hdf5_read(int_tmp,filename,path//'/BOOT_OPS/IMP_PRESSURE',success=success)
+    IF(success) self%boot_ops%imp_pressure = (int_tmp/=0)
+  END IF
+  ! Files written before the option existed keep the default (Redl 2021)
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/BS_MODEL'))THEN
+    CALL hdf5_read(self%boot_ops%bs_model,filename,path//'/BOOT_OPS/BS_MODEL',success=success)
+    IF((self%boot_ops%bs_model /= 1).AND.(self%boot_ops%bs_model /= 2))THEN
+      CALL oft_warn('jphi_bs_load: invalid "bs_model" in file, using 1 (Redl 2021)')
+      self%boot_ops%bs_model = 1
+    END IF
+  END IF
+  ! Files written before the option existed keep the default (1)
+  IF(hdf5_field_exist(filename,path//'/BOOT_OPS/ION_CHARGE_MODEL'))THEN
+    CALL hdf5_read(self%boot_ops%ion_charge_model,filename,path//'/BOOT_OPS/ION_CHARGE_MODEL',success=success)
+    IF((self%boot_ops%ion_charge_model /= 1).AND.(self%boot_ops%ion_charge_model /= 2))THEN
+      CALL oft_warn('jphi_bs_load: invalid "ion_charge_model" in file, using 1')
+      self%boot_ops%ion_charge_model = 1
+    END IF
   END IF
   self%boot_ops%initialized = .TRUE.
 END IF
@@ -504,9 +537,10 @@ END FUNCTION h5_name
 !! (LCFS and the profile nodes `xpsi`):
 !!   1. Pressure scale.
 !!   2. jphi_fixed, the input sawtooth current jphi_saw_in and the bootstrap current jphi_bs (here
-!!      with its pressure-driven part jphi_pd, which isolation and scale_jbs leave out), optionally
-!!      isolated and scaled, or reused from the last evaluation when frozen; <R>, <1/R>, <1/R^2> on the nodes
-!!      from its Sauter pass, else (and on the LCFS) from gs_ravgs.
+!!      with its pressure-driven part jphi_pd, which isolation and scale_jbs leave out): the kinetic
+!!      profiles of `gseq` on the nodes passed to @ref bootstrap_eval with the options of boot_ops,
+!!      optionally isolated and scaled, or reused from the last evaluation when frozen; <R>, <1/R>,
+!!      <1/R^2> on the nodes from its Sauter pass, else (and on the LCFS) from gs_ravgs.
 !!   3. Edge taper of jphi_bs, jphi_pd, jphi_ind, jphi_fixed and jphi_saw_in.
 !!   4. alpha from the exact I_p (gs_flux_int of eval_dIdA, eq. A9c), which is affine in
 !!      alpha: alpha = (Ip_target - Ip_lo)/(Ip_hi - Ip_lo).
@@ -529,6 +563,8 @@ REAL(r8), ALLOCATABLE :: qa(:,:) !< q and dA/dpsi_N at psi_n from the contour pa
 REAL(r8), ALLOCATABLE :: jtor(:)  !< dI/dA for the exact I_p measure (eval_dIdA)
 REAL(r8), ALLOCATABLE :: jphi_bs(:), jphi_pd(:), jphi_ind(:), jphi_fixed(:), jphi_total(:)
 REAL(r8), ALLOCATABLE :: jphi_bs_spike(:) !< Isolated edge spike [A/m^2]
+REAL(r8), ALLOCATABLE :: Te(:), Ti(:), ne(:), ni(:), Zeff(:), nimp(:) !< Kinetic profiles on xpsi [eV, m^-3]
+REAL(r8), ALLOCATABLE :: jdotB(:) !< <j_BS.B> [T A/m^2] on psi_n
 !> Sawtooth current: input, value entering the alpha solve, result, reset increment
 REAL(r8), ALLOCATABLE :: jphi_saw_in(:), jphi_saw_cur(:), jphi_saw(:), djphi_saw(:)
 REAL(r8), ALLOCATABLE :: cflds(:,:), cum(:,:)
@@ -578,7 +614,37 @@ IF(bs_frozen) THEN
   jphi_pd = self%jphi_pd_last
   djbs = 0.0_r8
 ELSE
-  CALL calculate_bootstrap(self, gseq, self%npsi, xpsi, jphi_bs, jphi_pd, ierr, ravgs=ravgs(1:,:), qa=qa(1:,:))
+  !   Kinetic profiles on the nodes (Te, Ti from keV to eV), then @ref bootstrap_eval with the options
+  !   of boot_ops; the result is also stored in boot_profs (`_raw` profiles)
+  ALLOCATE(Te(self%npsi), Ti(self%npsi), ne(self%npsi), ni(self%npsi), Zeff(self%npsi), nimp(self%npsi))
+  ALLOCATE(jdotB(0:self%npsi))
+  DO i = 1, self%npsi
+    Te(i) = gseq%Te%fp(xpsi(i)) * 1000.0_r8
+    Ti(i) = gseq%Ti%fp(xpsi(i)) * 1000.0_r8
+    ne(i) = gseq%ne%fp(xpsi(i))
+    ni(i) = gseq%ni%fp(xpsi(i))
+    Zeff(i) = gseq%Zeff%fp(xpsi(i))
+  END DO
+  IF(MAXVAL(Te) > 5.0e5_r8)CALL oft_warn('jphi_bs_update: max(Te) > 500 keV -- profiles should be in keV, not eV')
+  IF(MAXVAL(Ti) > 5.0e5_r8)CALL oft_warn('jphi_bs_update: max(Ti) > 500 keV -- profiles should be in keV, not eV')
+  IF(self%boot_ops%imp_pressure)THEN
+    CALL imp_density(self%npsi, ne, ni, Zeff, nimp)
+    CALL bootstrap_eval(gseq, self%npsi, xpsi, Te, Ti, ne, ni, Zeff, pscale, self%boot_ops%ln_lambda_model, &
+      self%boot_ops%bs_model, self%boot_ops%ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, nimp=nimp, &
+      ravgs=ravgs(1:,:), qa=qa(1:,:), &
+      diagnose=self%boot_ops%diagnose_bs)
+  ELSE
+    CALL bootstrap_eval(gseq, self%npsi, xpsi, Te, Ti, ne, ni, Zeff, pscale, self%boot_ops%ln_lambda_model, &
+      self%boot_ops%bs_model, self%boot_ops%ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, &
+      ravgs=ravgs(1:,:), qa=qa(1:,:), &
+      diagnose=self%boot_ops%diagnose_bs)
+  END IF
+  IF(ierr == 0)THEN
+    self%boot_profs%jdotB_bs_raw = jdotB
+    self%boot_profs%jphi_bs_raw = jphi_bs - jphi_pd
+    self%boot_profs%jphi_pd_raw = jphi_pd
+  END IF
+  DEALLOCATE(Te, Ti, ne, ni, Zeff, nimp, jdotB)
   IF(ierr /= 0)THEN
     gseq%prof_failed=.TRUE. ! The solve ends with error -10
     RETURN
@@ -1687,31 +1753,68 @@ ierr = -1
 END SUBROUTINE fail
 END SUBROUTINE gradient_
 !------------------------------------------------------------------------------
-!> Bootstrap current (Redl 2021) on the nodes psi_N (bootstrap.py calculate_profiles_and_bootstrap)
-!!
-!! NRL Coulomb logs, Koh ion collisionality, Redl jboot1 (no sign(q) factor: <j.B> is odd in F), L34=L31.
-!!
-!! @param gseq    Equilibrium object (must have Te, Ti, ne, ni, Zeff set)
-!! @param n_psi   Number of flux surface samples
-!! @param psi_N   Normalised psi, OFT convention (0=LCFS, 1=axis), any spacing, psi_N(1)>0
-!! @param jphi_bs Output: bootstrap current density as TokaMaker jphi = <j_phi> [A/m^2] on psi_N grid
-!! @param jphi_pd Output: its pressure-driven part [A/m^2]
-!! @param ierr    Output: 0 on success, -1 if a gradient or the boundary extrapolation failed
+!> Density of one impurity species that, with main ions of charge 1, satisfies quasineutrality and gives
+!! Z_eff: from n_e = n_i + Z n_imp and Z_eff n_e = n_i + Z^2 n_imp, n_imp = (n_e - n_i)^2/(Z_eff n_e - n_i)
+!! (zero where n_i >= n_e or Z_eff n_e <= n_i; with Z_eff < 1 the result, of charge Z < 1, is not a
+!! physical species)
 !------------------------------------------------------------------------------
-SUBROUTINE calculate_bootstrap(self, gseq, n_psi, psi_N, jphi_bs, jphi_pd, ierr, ravgs, qa)
-CLASS(jphi_bs_flux_func), INTENT(inout) :: self
-CLASS(gs_equil), INTENT(inout) :: gseq
-INTEGER(i4), INTENT(in) :: n_psi
-REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi (OFT convention, 0=LCFS), psi_N(1)>0
-REAL(r8), INTENT(out) :: jphi_bs(0:n_psi) !< jphi_bs(0) the LCFS value (extrapolated)
-REAL(r8), INTENT(out) :: jphi_pd(0:n_psi) !< Pressure-driven part of jphi_bs
-INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 on failure (warned)
+SUBROUTINE imp_density(n, ne, ni, Zeff, nimp)
+INTEGER(i4), INTENT(in) :: n !< Number of points
+REAL(r8), INTENT(in) :: ne(n) !< Electron density [m^-3]
+REAL(r8), INTENT(in) :: ni(n) !< Main-ion density [m^-3]
+REAL(r8), INTENT(in) :: Zeff(n) !< Effective charge
+REAL(r8), INTENT(out) :: nimp(n) !< Impurity density [m^-3]
+nimp = 0.0_r8
+WHERE((ne > ni) .AND. (Zeff*ne > ni)) nimp = (ne - ni)**2/(Zeff*ne - ni)
+END SUBROUTINE imp_density
+!------------------------------------------------------------------------------
+!> Bootstrap current of the current equilibrium on the nodes psi_N, from given kinetic profiles on
+!! the nodes
+!!
+!! jboot1 form (no sign(q) factor: <j.B> is odd in F) with the coefficients of `bs_model` (see
+!! @ref redl_bootstrap: 1 = Redl 2021 with L34=L31, 2 = Sauter 1999 with its 2002 erratum), |q|, and the major
+!! radius (R_max+R_min)/2 and inverse aspect ratio of each surface from @ref sauter_fc. Coulomb logarithms
+!! (`ln_lambda_model`): 1 = NRL formulary electron form and the ion form of Sauter 1999 eq. 18e,
+!! both floored at 10; 2 = Sauter 1999 eqs. 18d and 18e, no floor. Ion charge Z in nu_i* (Z^4) and in
+!! ln Lambda_ii (`ion_charge_model`): 1 = the Koh multi-species form with main ions of charge 1,
+!! Z^4 = (n_e/n_i) Z_eff, and Z = max(n_e/n_i,1) in ln Lambda_ii; 2 = the main-ion charge, 1, in both, as
+!! the 2002 erratum prescribes for Sauter 1999 eqs. 18c and 18e (with `bs_model` 2 and `ln_lambda_model` 2
+!! this is the published model).
+!! The main-ion density enters the collisionality and the Coulomb logarithms; the ion pressure and
+!! its gradient also count `nimp` (at T_i) if present. Gradients are taken on the nodes; the LCFS is
+!! not a node, and the values there (and on the axis, if it is a node) are extrapolated.
+!! Neither `gseq` nor any bootstrap profile state is changed.
+!------------------------------------------------------------------------------
+SUBROUTINE bootstrap_eval(gseq, n_psi, psi_N, Te, Ti, ne, ni, Zeff, pscale, ln_lambda_model, bs_model, &
+  ion_charge_model, jdotB, jphi_bs, jphi_pd, ierr, nimp, ravgs, qa, ft_out, nu_out, geo_out, diagnose)
+CLASS(gs_equil), INTENT(inout) :: gseq !< Equilibrium object (not changed)
+INTEGER(i4), INTENT(in) :: n_psi !< Number of nodes
+REAL(r8), INTENT(in) :: psi_N(1:n_psi)  !< Normalised psi (OFT convention, 0=LCFS), strictly increasing, psi_N(1)>0
+REAL(r8), INTENT(in) :: Te(n_psi) !< Electron temperature [eV]
+REAL(r8), INTENT(in) :: Ti(n_psi) !< Ion temperature [eV]
+REAL(r8), INTENT(in) :: ne(n_psi) !< Electron density [m^-3]
+REAL(r8), INTENT(in) :: ni(n_psi) !< Main-ion density [m^-3]
+REAL(r8), INTENT(in) :: Zeff(n_psi) !< Effective charge
+REAL(r8), INTENT(in) :: pscale !< Pressure profile scale: P' = pscale*P%fp (pressure-driven part)
+INTEGER(i4), INTENT(in) :: ln_lambda_model !< Coulomb logarithms: 1 = NRL, 2 = Sauter 1999
+INTEGER(i4), INTENT(in) :: bs_model !< Bootstrap coefficients: 1 = Redl 2021, 2 = Sauter 1999 (2002 erratum)
+INTEGER(i4), INTENT(in) :: ion_charge_model !< Ion charge in nu_i*, ln Lambda_ii: 1 = Koh form, 2 = main-ion charge (erratum)
+REAL(r8), INTENT(out) :: jdotB(0:n_psi) !< <j_BS.B> [T A/m^2], jdotB(0) the LCFS value (extrapolated)
+REAL(r8), INTENT(out) :: jphi_bs(0:n_psi) !< Bootstrap current as TokaMaker jphi = <j_phi> [A/m^2], with jphi_pd
+REAL(r8), INTENT(out) :: jphi_pd(0:n_psi) !< Pressure-driven part of jphi_bs [A/m^2]
+INTEGER(i4), INTENT(out) :: ierr !< 0 on success, -1 if a gradient or the boundary extrapolation failed (warned)
+REAL(r8), OPTIONAL, INTENT(in) :: nimp(n_psi) !< Impurity density counted in the ion pressure [m^-3]
 REAL(r8), OPTIONAL, INTENT(out) :: ravgs(n_psi,3) !< <R>, <1/R>, <1/R^2> on psi_N from the Sauter pass
 REAL(r8), OPTIONAL, INTENT(out) :: qa(n_psi,2) !< q and dA/dpsi_N on psi_N from the Sauter contour pass (see @ref sauter_fc)
+REAL(r8), OPTIONAL, INTENT(out) :: ft_out(n_psi) !< Trapped particle fraction
+REAL(r8), OPTIONAL, INTENT(out) :: nu_out(n_psi,2) !< Collisionalities nu_e*, nu_i*
+REAL(r8), OPTIONAL, INTENT(out) :: geo_out(n_psi,8) !< Geometry of the Sauter pass (as @ref sauter_fc returns it):
+!! eps, (R_max+R_min)/2, q, <R>, <1/R>, <1/R^2>, <|B|>, <|B|^2>
+LOGICAL, OPTIONAL, INTENT(in) :: diagnose !< Print a sample of the geometry and collisionality
 !---
 INTEGER(i4) :: i
 REAL(r8) :: psi_abs(n_psi)
-REAL(r8) :: Te(n_psi), Ti(n_psi), ne(n_psi), ni(n_psi), Zeff(n_psi)
+REAL(r8) :: nit(n_psi)      !< Ion density in the pressure: main ions (and impurity)
 REAL(r8) :: pe(n_psi), pi_arr(n_psi)
 REAL(r8) :: f(n_psi)        !< I(psi) = R*Bt [T*m]
 REAL(r8) :: fc(n_psi)       !< Circulating fraction
@@ -1729,23 +1832,12 @@ REAL(r8) :: ln_le(n_psi), ln_lii(n_psi), Z_lnLam(n_psi)
 REAL(r8) :: Zavg(n_psi), Zion(n_psi)
 REAL(r8) :: nu_i_star(n_psi), nu_e_star(n_psi)
 REAL(r8) :: jdotB_bs(n_psi)
-REAL(r8) :: jdotB(0:n_psi) !< <j_BS.B> with its LCFS/axis values
-REAL(r8) :: psi_range, Zdom, pscale, pprime
+REAL(r8) :: psi_range, Zdom, pprime
 REAL(r8), PARAMETER :: EC = 1.602176634e-19_r8
 !---
 ! Compute raw psi values from the caller-supplied psi_N grid
 psi_range = gseq%plasma_bounds(2) - gseq%plasma_bounds(1)
 psi_abs = gseq%plasma_bounds(1) + psi_N * psi_range
-! Evaluate kinetic profiles on the psi grid; convert Te/Ti from keV to eV
-DO i = 1, n_psi
-  Te(i) = gseq%Te%fp(psi_N(i)) * 1000.0_r8
-  Ti(i) = gseq%Ti%fp(psi_N(i)) * 1000.0_r8
-  ne(i) = gseq%ne%fp(psi_N(i))
-  ni(i) = gseq%ni%fp(psi_N(i))
-  Zeff(i) = gseq%Zeff%fp(psi_N(i))
-END DO
-IF(MAXVAL(Te) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Te) > 500 keV -- profiles should be in keV, not eV')
-IF(MAXVAL(Ti) > 5.0e5_r8)CALL oft_warn('calculate_bootstrap: max(Ti) > 500 keV -- profiles should be in keV, not eV')
 ! Get I(psi) = R*Bt = F(psi) profile on the psi_N grid
 DO i = 1, n_psi
   f(i) = gs_fpol(gseq, psi_abs(i))
@@ -1756,14 +1848,16 @@ IF(PRESENT(ravgs))ravgs = RESHAPE([r_avgs_saut(:,1:2), invr2], [n_psi,3])
 B_avg = modb_avgs_saut(:,1)
 ! ===================================================================
 ft = 1.0_r8 - fc
-! Pressures [Pa]
+! Pressures [Pa]; the ion pressure counts the impurity if given
+nit = ni
+IF(PRESENT(nimp))nit = ni + nimp
 pe = EC * ne * Te
-pi_arr = EC * ni * Ti
+pi_arr = EC * nit * Ti
 ! Gradients d/dpsi [Wb^-1]
 CALL gradient_(n_psi, psi_abs, Te, dT_e_dpsi, ierr)
 IF(ierr == 0)CALL gradient_(n_psi, psi_abs, Ti, dT_i_dpsi, ierr)
 IF(ierr == 0)CALL gradient_(n_psi, psi_abs, ne, dn_e_dpsi, ierr)
-IF(ierr == 0)CALL gradient_(n_psi, psi_abs, ni, dn_i_dpsi, ierr)
+IF(ierr == 0)CALL gradient_(n_psi, psi_abs, nit, dn_i_dpsi, ierr)
 IF(ierr /= 0)RETURN
 ! In the Fortran internal convention psi increases LCFS->axis (opposite to the
 ! standard Sauter/Redl derivation where psi increases axis->LCFS).  Negate
@@ -1772,35 +1866,42 @@ dT_e_dpsi = -dT_e_dpsi
 dT_i_dpsi = -dT_i_dpsi
 dn_e_dpsi = -dn_e_dpsi
 dn_i_dpsi = -dn_i_dpsi
-! Coulomb logarithms (NRL formulary)
-! Electron: ne divided by 1e6 to convert m^-3 -> cm^-3
-ln_le = 23.5_r8 &
-      - LOG(SQRT(ne/1.0e6_r8) * Te**(-1.25_r8)) &
-      - SQRT(1.0e-5_r8 + (LOG(Te) - 2.0_r8)**2 / 16.0_r8)
-! Ion: constant 30 absorbs the m^-3 -> cm^-3 conversion
+Zdom = 1.0_r8    ! main (dominant) ion charge (deuterium)
+! Ion charge in ln Lambda_ii: max(n_e/n_i,1), or the main-ion charge (Sauter 1999 eq. 18e with the 2002 erratum)
 Z_lnLam = MAX(ne/ni, 1.0_r8)
-ln_lii = 30.0_r8 - LOG(Z_lnLam**3 * SQRT(ni) / Ti**1.5_r8)
-ln_le  = MAX(ln_le,  10.0_r8)
-ln_lii = MAX(ln_lii, 10.0_r8)
-! Ion collisionality: Koh multi-species model
-Zdom = 1.0_r8    ! dominant ion charge (deuterium)
+IF(ion_charge_model == 2)Z_lnLam = Zdom
+IF(ln_lambda_model == 2)THEN
+  ! Coulomb logarithms of Sauter et al., Phys. Plasmas 6, 2834 (1999), eqs. 18d and 18e (n in m^-3, T in eV)
+  ln_le = 31.3_r8 - LOG(SQRT(ne) / Te)
+  ln_lii = 30.0_r8 - LOG(Z_lnLam**3 * SQRT(ni) / Ti**1.5_r8)
+ELSE
+  ! Coulomb logarithms (NRL formulary)
+  ! Electron: ne divided by 1e6 to convert m^-3 -> cm^-3
+  ln_le = 23.5_r8 &
+        - LOG(SQRT(ne/1.0e6_r8) * Te**(-1.25_r8)) &
+        - SQRT(1.0e-5_r8 + (LOG(Te) - 2.0_r8)**2 / 16.0_r8)
+  ! Ion: constant 30 absorbs the m^-3 -> cm^-3 conversion
+  ln_lii = 30.0_r8 - LOG(Z_lnLam**3 * SQRT(ni) / Ti**1.5_r8)
+  ln_le  = MAX(ln_le,  10.0_r8)
+  ln_lii = MAX(ln_lii, 10.0_r8)
+END IF
+! Ion collisionality: Koh multi-species model, or the main-ion charge (Sauter 1999 eq. 18c with the 2002 erratum)
 Zavg = ne / ni
 Zion = (Zdom**2 * Zavg * Zeff)**0.25_r8
+IF(ion_charge_model == 2)Zion = Zdom
 nu_i_star = 4.90e-18_r8 * ABS(qvals) * R_geo * ni &
           * Zion**4 * ln_lii / (Ti**2 * eps**1.5_r8)
 ! Electron collisionality
 nu_e_star = 6.921e-18_r8 * ABS(qvals) * R_geo * ne &
           * Zeff * ln_le / (Te**2 * eps**1.5_r8)
-! Compute bootstrap current via Redl 2021
-CALL redl_bootstrap(n_psi, Te, Ti, ne, ni, pe, pi_arr, Zeff, eps, ft, f, &
+! Compute bootstrap current (Redl 2021 or Sauter 1999 coefficients)
+CALL redl_bootstrap(n_psi, Te, Ti, ne, nit, pe, pi_arr, Zeff, eps, ft, f, &
     dT_e_dpsi, dT_i_dpsi, dn_e_dpsi, dn_i_dpsi, &
-    nu_e_star, nu_i_star, jdotB_bs)
+    nu_e_star, nu_i_star, jdotB_bs, bs_model)
 ! Convert <j_BS.B> to TokaMaker's jphi = <j_phi> = <R>P' + <1/R>FF'/mu0 (exact, see
 ! doc_tokamaker_current_conventions.md eq. A7): the field-aligned part F<1/R>/<B^2> * <j_BS.B>,
 ! plus the pressure-driven (diamagnetic + Pfirsch-Schlueter) part P'(<R> - F^2<1/R>/<B^2>),
 ! which is assigned to the bootstrap (as IMAS includes_bootstrap=true); boot_profs report it apart.
-! P' as in jphi_bs_update.
-pscale = gseq%pax_target/gseq%P%f(gseq%plasma_bounds(2))
 jphi_bs(0) = 0.0_r8 ! LCFS value set by the extrapolation below
 jphi_pd(0) = 0.0_r8
 DO i = 1, n_psi
@@ -1818,11 +1919,12 @@ CALL finish(jphi_bs)
 IF(ierr == 0)CALL finish(jphi_pd)
 IF(ierr == 0)CALL finish(jdotB)
 IF(ierr /= 0)RETURN
-self%boot_profs%jdotB_bs_raw = jdotB
-self%boot_profs%jphi_bs_raw = jphi_bs - jphi_pd
-self%boot_profs%jphi_pd_raw = jphi_pd
-IF(self%boot_ops%diagnose_bs)THEN
-  WRITE(*,'(A)') '  [calculate_bootstrap] geometry & collisionality sample (i=1,mid,n):'
+IF(PRESENT(ft_out))ft_out = ft
+IF(PRESENT(nu_out))nu_out = RESHAPE([nu_e_star, nu_i_star], [n_psi,2])
+IF(PRESENT(geo_out))geo_out = RESHAPE([eps, R_geo, qvals, r_avgs_saut(:,1:2), invr2, modb_avgs_saut], [n_psi,8])
+IF(.NOT.PRESENT(diagnose))RETURN
+IF(diagnose)THEN
+  WRITE(*,'(A)') '  [bootstrap_eval] geometry & collisionality sample (i=1,mid,n):'
   WRITE(*,'(A,3ES12.4)') '    <R>      : ', r_avgs_saut(1,1), r_avgs_saut(n_psi/2,1), r_avgs_saut(n_psi,1)
   WRITE(*,'(A,3ES12.4)') '    <1/R>    : ', r_avgs_saut(1,2), r_avgs_saut(n_psi/2,2), r_avgs_saut(n_psi,2)
   WRITE(*,'(A,3ES12.4)') '    <B>      : ', B_avg(1), B_avg(n_psi/2), B_avg(n_psi)
@@ -1839,7 +1941,7 @@ REAL(r8), INTENT(inout) :: a(0:n_psi)
 WHERE(.NOT.(ABS(a) < 1.0e99_r8)) a = 0.0_r8
 CALL extrap_jbs_boundaries(n_psi, psi_N, a, ierr)
 END SUBROUTINE finish
-END SUBROUTINE calculate_bootstrap
+END SUBROUTINE bootstrap_eval
 !------------------------------------------------------------------------------
 !> Edge spike of a bootstrap profile (OFT convention), as isolate_edge_jbs in
 !! bootstrap.py calculate_profiles_and_bootstrap
@@ -2085,15 +2187,19 @@ IF (ABS(dx_window) > 0.0_r8 .AND. idx_end > idx_start) THEN
 END IF
 END SUBROUTINE analyze_bootstrap_edge_spike
 !------------------------------------------------------------------------------
-!> Redl 2021 bootstrap current formula.
+!> Bootstrap current formula in the jboot1 form, with the Redl 2021 (model 1) or the Sauter 1999
+!! (model 2, @ref sauter_coefs) coefficients; the two share everything but L31, L32, L34 and alpha.
+!! The routine keeps the name of the Python function it translates although it hosts both sets.
 !!
 !! Translates Python bootstrap.py:redl_bootstrap with fixed settings:
-!!   - use_legacy_L34 = .FALSE.  (L34 = L31)
+!!   - coefficient_model = 'redl' (model 1) or 'sauter' (model 2)
+!!   - use_legacy_L34 = .FALSE.  (L34 = L31 with model 1)
 !!   - no sign(q) factor (<j.B> is odd in F through I_psi)
 !!   - formula_form   = 'jboot1'
 !!   - nu_e_star and nu_i_star are passed in pre-computed (no internal fallback)
 !!
-!! Reference: Redl et al., Phys. Plasmas 28, 022502 (2021)
+!! References: Redl et al., Phys. Plasmas 28, 022502 (2021); Sauter et al., Phys. Plasmas 6, 2834 (1999)
+!! and Erratum, Phys. Plasmas 9, 5140 (2002)
 !!
 !! @param n           Number of flux surfaces
 !! @param Te          Electron temperature [eV]
@@ -2113,10 +2219,11 @@ END SUBROUTINE analyze_bootstrap_edge_spike
 !! @param nu_e_star   Electron collisionality (pre-computed)
 !! @param nu_i_star   Ion collisionality (pre-computed)
 !! @param avg_j_bootstrap_times_B Output: <j_{bs,parallel}*B> [same units as -I_psi * pe * d/dpsi]
+!! @param model       Coefficients: 2 = Sauter 1999 with its 2002 erratum, otherwise Redl 2021
 !------------------------------------------------------------------------------
 SUBROUTINE redl_bootstrap(n, Te, Ti, ne, ni, pe, pi, Zeff, eps, fT, I_psi, &
     dT_e_dpsi, dT_i_dpsi, dn_e_dpsi, dn_i_dpsi, &
-    nu_e_star, nu_i_star, avg_j_bootstrap_times_B)
+    nu_e_star, nu_i_star, avg_j_bootstrap_times_B, model)
 INTEGER(i4), INTENT(in) :: n
 REAL(r8), INTENT(in) :: Te(n), Ti(n), ne(n), ni(n)
 REAL(r8), INTENT(in) :: pe(n), pi(n), Zeff(n)
@@ -2125,6 +2232,7 @@ REAL(r8), INTENT(in) :: dT_e_dpsi(n), dT_i_dpsi(n)
 REAL(r8), INTENT(in) :: dn_e_dpsi(n), dn_i_dpsi(n)
 REAL(r8), INTENT(in) :: nu_e_star(n), nu_i_star(n)
 REAL(r8), INTENT(out) :: avg_j_bootstrap_times_B(n)
+INTEGER(i4), INTENT(in) :: model
 !---
 REAL(r8) :: R_pe(n)
 REAL(r8) :: ft_31_d1(n), ft_31_d2(n), X31(n), L31(n), L34(n), dZ(n)
@@ -2135,59 +2243,63 @@ REAL(r8) :: dp_dpsi(n), bra1(n), bra2(n), bra3(n)
 REAL(r8), PARAMETER :: EC = 1.602176634e-19_r8
 !---
 R_pe = pe / (pe + pi)
-! =====================================================================
-! L31 (Redl Eqs. 10-11)
-! =====================================================================
-ft_31_d1 = (0.67_r8 * (1.0_r8 - 0.7_r8*fT) * SQRT(nu_e_star)) &
-         / (0.56_r8 + 0.44_r8*Zeff)
-ft_31_d2 = ((0.52_r8 + 0.086_r8*SQRT(nu_e_star)) &
-          * (1.0_r8 + 0.87_r8*fT) * nu_e_star) &
-         / (1.0_r8 + 1.13_r8*SQRT(MAX(Zeff - 1.0_r8, 0.0_r8)))
-X31 = fT / (1.0_r8 + ft_31_d1 + ft_31_d2)
-dZ = Zeff**1.2_r8 - 0.71_r8
-L31 = (1.0_r8 + 0.15_r8/dZ)*X31 &
-    - (0.22_r8/dZ)*X31**2 &
-    + (0.01_r8/dZ)*X31**3 &
-    + (0.06_r8/dZ)*X31**4
-! L34 = L31 (use_legacy_L34 = .FALSE.)
-L34 = L31
-! =====================================================================
-! L32 (Redl Eqs. 12-16)
-! =====================================================================
-dee_2 = (0.23_r8 * (1.0_r8 - 0.96_r8*fT) * SQRT(nu_e_star)) &
-      / SQRT(Zeff)
-dee_3 = (0.13_r8 * (1.0_r8 - 0.38_r8*fT) * nu_e_star / (Zeff**2)) &
-      * (SQRT(1.0_r8 + 2.0_r8*SQRT(MAX(Zeff - 1.0_r8, 0.0_r8))) &
-       + fT**2 * SQRT((0.075_r8 + 0.25_r8*(Zeff - 1.0_r8)**2) * nu_e_star))
-X32_ee = fT / (1.0_r8 + dee_2 + dee_3)
-F32_ee = ( (0.1_r8 + 0.6_r8*Zeff) &
-         / (Zeff*(0.77_r8 + 0.63_r8*(1.0_r8 + MAX(Zeff - 1.0_r8, 0.0_r8)**1.1_r8))) &
-         * (X32_ee - X32_ee**4) &
-         + 0.7_r8/(1.0_r8 + 0.2_r8*Zeff) &
-         * (X32_ee**2 - X32_ee**4 - 1.2_r8*(X32_ee**3 - X32_ee**4)) &
-         + 1.3_r8/(1.0_r8 + 0.5_r8*Zeff) * X32_ee**4 )
-dei_2 = (0.87_r8 * (1.0_r8 + 0.39_r8*fT) * SQRT(nu_e_star)) &
-      / (1.0_r8 + 2.95_r8*(Zeff - 1.0_r8)**2)
-dei_3 = 1.53_r8 * (1.0_r8 - 0.37_r8*fT) * nu_e_star &
-      * (2.0_r8 + 0.375_r8*(Zeff - 1.0_r8))
-X32_ei = fT / (1.0_r8 + dei_2 + dei_3)
-F32_ei = ( -(0.4_r8 + 1.93_r8*Zeff) / (Zeff*(0.8_r8 + 0.6_r8*Zeff)) &
-           * (X32_ei - X32_ei**4) &
-           + 5.5_r8/(1.5_r8 + 2.0_r8*Zeff) &
-           * (X32_ei**2 - X32_ei**4 - 0.8_r8*(X32_ei**3 - X32_ei**4)) &
-           - 1.3_r8/(1.0_r8 + 0.5_r8*Zeff) * X32_ei**4 )
-L32 = F32_ee + F32_ei
-! =====================================================================
-! Alpha (Redl Eqs. 20-21)
-! =====================================================================
-alpha0 = -(0.62_r8 + 0.055_r8*(Zeff - 1.0_r8)) &
-        / (0.53_r8 + 0.17_r8*(Zeff - 1.0_r8)) &
-        * (1.0_r8 - fT) &
-        / (1.0_r8 - (0.31_r8 - 0.065_r8*(Zeff - 1.0_r8))*fT - 0.25_r8*fT**2)
-alpha = ((alpha0 + 0.7_r8*Zeff*SQRT(fT)*SQRT(nu_i_star)) &
-       / (1.0_r8 + 0.18_r8*SQRT(nu_i_star)) &
-       - 0.002_r8*nu_i_star**2*fT**6) &
-      / (1.0_r8 + 0.004_r8*nu_i_star**2*fT**6)
+IF(model == 2)THEN
+  CALL sauter_coefs(n, Zeff, fT, nu_e_star, nu_i_star, L31, L32, L34, alpha)
+ELSE
+  ! =====================================================================
+  ! L31 (Redl Eqs. 10-11)
+  ! =====================================================================
+  ft_31_d1 = (0.67_r8 * (1.0_r8 - 0.7_r8*fT) * SQRT(nu_e_star)) &
+           / (0.56_r8 + 0.44_r8*Zeff)
+  ft_31_d2 = ((0.52_r8 + 0.086_r8*SQRT(nu_e_star)) &
+            * (1.0_r8 + 0.87_r8*fT) * nu_e_star) &
+           / (1.0_r8 + 1.13_r8*SQRT(MAX(Zeff - 1.0_r8, 0.0_r8)))
+  X31 = fT / (1.0_r8 + ft_31_d1 + ft_31_d2)
+  dZ = Zeff**1.2_r8 - 0.71_r8
+  L31 = (1.0_r8 + 0.15_r8/dZ)*X31 &
+      - (0.22_r8/dZ)*X31**2 &
+      + (0.01_r8/dZ)*X31**3 &
+      + (0.06_r8/dZ)*X31**4
+  ! L34 = L31 (use_legacy_L34 = .FALSE.)
+  L34 = L31
+  ! =====================================================================
+  ! L32 (Redl Eqs. 12-16)
+  ! =====================================================================
+  dee_2 = (0.23_r8 * (1.0_r8 - 0.96_r8*fT) * SQRT(nu_e_star)) &
+        / SQRT(Zeff)
+  dee_3 = (0.13_r8 * (1.0_r8 - 0.38_r8*fT) * nu_e_star / (Zeff**2)) &
+        * (SQRT(1.0_r8 + 2.0_r8*SQRT(MAX(Zeff - 1.0_r8, 0.0_r8))) &
+         + fT**2 * SQRT((0.075_r8 + 0.25_r8*(Zeff - 1.0_r8)**2) * nu_e_star))
+  X32_ee = fT / (1.0_r8 + dee_2 + dee_3)
+  F32_ee = ( (0.1_r8 + 0.6_r8*Zeff) &
+           / (Zeff*(0.77_r8 + 0.63_r8*(1.0_r8 + MAX(Zeff - 1.0_r8, 0.0_r8)**1.1_r8))) &
+           * (X32_ee - X32_ee**4) &
+           + 0.7_r8/(1.0_r8 + 0.2_r8*Zeff) &
+           * (X32_ee**2 - X32_ee**4 - 1.2_r8*(X32_ee**3 - X32_ee**4)) &
+           + 1.3_r8/(1.0_r8 + 0.5_r8*Zeff) * X32_ee**4 )
+  dei_2 = (0.87_r8 * (1.0_r8 + 0.39_r8*fT) * SQRT(nu_e_star)) &
+        / (1.0_r8 + 2.95_r8*(Zeff - 1.0_r8)**2)
+  dei_3 = 1.53_r8 * (1.0_r8 - 0.37_r8*fT) * nu_e_star &
+        * (2.0_r8 + 0.375_r8*(Zeff - 1.0_r8))
+  X32_ei = fT / (1.0_r8 + dei_2 + dei_3)
+  F32_ei = ( -(0.4_r8 + 1.93_r8*Zeff) / (Zeff*(0.8_r8 + 0.6_r8*Zeff)) &
+             * (X32_ei - X32_ei**4) &
+             + 5.5_r8/(1.5_r8 + 2.0_r8*Zeff) &
+             * (X32_ei**2 - X32_ei**4 - 0.8_r8*(X32_ei**3 - X32_ei**4)) &
+             - 1.3_r8/(1.0_r8 + 0.5_r8*Zeff) * X32_ei**4 )
+  L32 = F32_ee + F32_ei
+  ! =====================================================================
+  ! Alpha (Redl Eqs. 20-21)
+  ! =====================================================================
+  alpha0 = -(0.62_r8 + 0.055_r8*(Zeff - 1.0_r8)) &
+          / (0.53_r8 + 0.17_r8*(Zeff - 1.0_r8)) &
+          * (1.0_r8 - fT) &
+          / (1.0_r8 - (0.31_r8 - 0.065_r8*(Zeff - 1.0_r8))*fT - 0.25_r8*fT**2)
+  alpha = ((alpha0 + 0.7_r8*Zeff*SQRT(fT)*SQRT(nu_i_star)) &
+         / (1.0_r8 + 0.18_r8*SQRT(nu_i_star)) &
+         - 0.002_r8*nu_i_star**2*fT**6) &
+        / (1.0_r8 + 0.004_r8*nu_i_star**2*fT**6)
+END IF
 ! =====================================================================
 ! Assemble: jboot1 form
 ! =====================================================================
@@ -2198,4 +2310,52 @@ bra2 = L32 * dT_e_dpsi / Te
 bra3 = L34 * alpha * (1.0_r8 - R_pe) / R_pe * dT_i_dpsi / Ti
 avg_j_bootstrap_times_B = -I_psi * pe * (bra1 + bra2 + bra3)
 END SUBROUTINE redl_bootstrap
+!------------------------------------------------------------------------------
+!> Bootstrap coefficients of Sauter, Angioni and Lin-Liu, Phys. Plasmas 6, 2834 (1999), eqs. 14-17,
+!! with the + sign of the 0.315 term of alpha (eq. 17b) of the Erratum, Phys. Plasmas 9, 5140 (2002).
+!! The erratum's (1-R_pe)/R_pe factor of the ion-temperature term is in the assembly of @ref redl_bootstrap;
+!! its main-ion charge in the ion terms (eqs. 18c, 18e) is not used (see @ref bootstrap_eval).
+!! Z = Z_eff in every coefficient (as the Redl 2021 fits of @ref redl_bootstrap).
+!------------------------------------------------------------------------------
+SUBROUTINE sauter_coefs(n, Zeff, fT, nu_e_star, nu_i_star, L31, L32, L34, alpha)
+INTEGER(i4), INTENT(in) :: n !< Number of points
+REAL(r8), INTENT(in) :: Zeff(n) !< Effective charge
+REAL(r8), INTENT(in) :: fT(n) !< Trapped particle fraction
+REAL(r8), INTENT(in) :: nu_e_star(n) !< Electron collisionality
+REAL(r8), INTENT(in) :: nu_i_star(n) !< Ion collisionality
+REAL(r8), INTENT(out) :: L31(n) !< L31 (eq. 14)
+REAL(r8), INTENT(out) :: L32(n) !< L32 = F32_ee + F32_ei (eq. 15)
+REAL(r8), INTENT(out) :: L34(n) !< L34 (eq. 16)
+REAL(r8), INTENT(out) :: alpha(n) !< alpha (eq. 17)
+REAL(r8) :: sq_e(n), X(n), Y(n), alpha0(n), w(n)
+sq_e = SQRT(nu_e_star)
+! L31: F31 of the effective trapped fraction of eq. 14b
+X = fT / (1.0_r8 + (1.0_r8 - 0.1_r8*fT)*sq_e + 0.5_r8*(1.0_r8 - fT)*nu_e_star/Zeff)
+L31 = F31(X)
+! L34: F31 of the effective trapped fraction of eq. 16b
+X = fT / (1.0_r8 + (1.0_r8 - 0.1_r8*fT)*sq_e + 0.5_r8*(1.0_r8 - 0.5_r8*fT)*nu_e_star/Zeff)
+L34 = F31(X)
+! L32: electron-electron (eqs. 15b, 15d) and electron-ion (eqs. 15c, 15e) parts
+X = fT / (1.0_r8 + 0.26_r8*(1.0_r8 - fT)*sq_e + 0.18_r8*(1.0_r8 - 0.37_r8*fT)*nu_e_star/SQRT(Zeff))
+Y = fT / (1.0_r8 + (1.0_r8 + 0.6_r8*fT)*sq_e + 0.85_r8*(1.0_r8 - 0.37_r8*fT)*nu_e_star*(1.0_r8 + Zeff))
+L32 = (0.05_r8 + 0.62_r8*Zeff)/(Zeff*(1.0_r8 + 0.44_r8*Zeff))*(X - X**4) &
+    + (X**2 - X**4 - 1.2_r8*(X**3 - X**4))/(1.0_r8 + 0.22_r8*Zeff) &
+    + 1.2_r8/(1.0_r8 + 0.5_r8*Zeff)*X**4
+L32 = L32 + (-(0.56_r8 + 1.93_r8*Zeff)/(Zeff*(1.0_r8 + 0.44_r8*Zeff))*(Y - Y**4) &
+    + 4.95_r8/(1.0_r8 + 2.48_r8*Zeff)*(Y**2 - Y**4 - 0.55_r8*(Y**3 - Y**4)) &
+    - 1.2_r8/(1.0_r8 + 0.5_r8*Zeff)*Y**4)
+! alpha (eqs. 17a-17b, + sign of the 0.315 term of eq. 17b as in the erratum)
+alpha0 = -1.17_r8*(1.0_r8 - fT)/(1.0_r8 - 0.22_r8*fT - 0.19_r8*fT**2)
+w = nu_i_star**2*fT**6
+alpha = ((alpha0 + 0.25_r8*(1.0_r8 - fT**2)*SQRT(nu_i_star))/(1.0_r8 + 0.5_r8*SQRT(nu_i_star)) + 0.315_r8*w) &
+      / (1.0_r8 + 0.15_r8*w)
+CONTAINS
+!> Eq. 14a, with the Z_eff of each point
+FUNCTION F31(t) RESULT(f)
+REAL(r8), INTENT(in) :: t(n) !< Effective trapped fraction
+REAL(r8) :: f(n)
+f = (1.0_r8 + 1.4_r8/(Zeff + 1.0_r8))*t - 1.9_r8/(Zeff + 1.0_r8)*t**2 &
+  + 0.3_r8/(Zeff + 1.0_r8)*t**3 + 0.2_r8/(Zeff + 1.0_r8)*t**4
+END FUNCTION F31
+END SUBROUTINE sauter_coefs
 END MODULE grad_shaf_bootstrap

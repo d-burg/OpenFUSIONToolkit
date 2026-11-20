@@ -84,12 +84,14 @@ class Device:
     ``flux_loops``: ``labels``, ``r``, ``z`` [m]; ``probes``: ``labels``, ``r``, ``z`` [m], ``angle_deg``
     (EFIT ``AMP2``: the probe normal is ``(cos, sin)`` of it in the (R, Z) plane), ``length`` [m] (``SMP2``);
     ``f_coils``: ``labels``, ``r``, ``z``, ``w``, ``h`` [m], ``turns``; ``e_coils``: ``labels``.
-    ``source``: file name and SHA-256 of the description it was read from.
+    ``probe_n_avg``: EFIT's probe averaging count ``NSMP2`` when the file states it (for
+    :func:`to_constraints`), else None.  ``source``: file name and SHA-256 of the description it was read from.
     '''
     flux_loops: Dict[str, list]
     probes: Dict[str, list]
     f_coils: Dict[str, list]
     e_coils: Dict[str, list]
+    probe_n_avg: Optional[int] = None
     source: Dict[str, str] = field(default_factory=dict)
 
     def labels(self, group):
@@ -149,6 +151,7 @@ def device_from_mhdin(path, f_coil_names=F_COILS, e_coil_names=E_COILS):
         f_coils={"labels": list(f_coil_names), "r": _floats(raw, "RF", nf), "z": _floats(raw, "ZF", nf),
                  "w": _floats(raw, "WF", nf), "h": _floats(raw, "HF", nf), "turns": _floats(raw, "TURNFC", nf)},
         e_coils={"labels": [e_coil_names[i - 1] for i in ecid]},
+        probe_n_avg=int(raw["NSMP2"][0]) if raw.get("NSMP2") and raw["NSMP2"][0] is not None else None,
         source={"file": os.path.basename(str(path)), "sha256": sha})
 
 

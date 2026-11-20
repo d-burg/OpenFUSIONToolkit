@@ -44,6 +44,9 @@ TE = 3e3 * (1 - 0.9 * np.minimum(PSI, 1.0) ** 2) + 50.0
 TI = 0.9 * TE
 RHO_MAP = (PSI[PSI <= 1.0], np.sqrt(PSI[PSI <= 1.0]))
 RAW_RHO = np.linspace(0.05, 0.85, 17)
+#: Ion-temperature points inside the boundary: the required coverage check passes (it is tested in
+#: test_TokaMaker_kinetic_ti_coverage.py).
+TI_COV = dict(points=dict(value=[2.0e3, 1.0e3], psi_N=[0.1, 0.6]), core_psi_n_max=None)
 
 
 def _nimp(fc0=0.01, slope=0.5):
@@ -87,7 +90,7 @@ def _build(cands, rule=None, n_fast="none", source=CHECKED, **kw):
                                    coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast=n_fast,
                                    zeff_rule=(dict(dict(slice_time=1.0, thresholds=TH), **(rule or {}))
                                               if source == CHECKED else None),
-                                   **kw)
+                                   **dict(dict(ti_coverage=TI_COV), **kw))
 
 
 def _quiet(**kw):
@@ -205,27 +208,30 @@ def test_a_rho_table_needs_the_psi_n_of_its_points():
                                                         sigma=None, rho=np.linspace(0.05, 0.95, 10)))}
     with pytest.raises(ValueError, match="psi_n"):
         assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0, n_fast="none",
-                                zeff_rule=dict(thresholds=TH))
+                                zeff_rule=dict(thresholds=TH), ti_coverage=TI_COV)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", Z.ZeffSourceWarning)
         k = assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0,
-                                    zeff_rule=dict(psi_n=psi, thresholds=TH), n_fast="none")
+                                    zeff_rule=dict(psi_n=psi, thresholds=TH), n_fast="none", ti_coverage=TI_COV)
     assert k.record["zeff_source"] == "cer"
     assert k.record["zeff_rule"]["candidates"][Z.IMPURITY]["tests"]["I-1"]["verdict"] == Z.PASS
 
 
 def test_the_named_route_is_unchanged_and_refuses_rule_options():
     old = assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": ("zeff", _zline())}, zeff_source="vb",
-                                  z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none")
+                                  z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none",
+                                  ti_coverage=TI_COV)
     new = assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": dict(kind="zeff", value=_zline())},
-                                  zeff_source="vb", z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none")
+                                  zeff_source="vb", z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none",
+                                  ti_coverage=TI_COV)
     np.testing.assert_array_equal(old.zeff, new.zeff)
     np.testing.assert_array_equal(old.ni, new.ni)
     assert "zeff_rule" not in old.record
     assert "not tested" in old.provenance["zeff"]
     with pytest.raises(ValueError, match="only with zeff_source"):
         assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": ("zeff", _zline())}, zeff_source="vb",
-                                z_imp=6.0, coordinate="psi_n", zeff_rule=dict(override="vb"), n_fast="none")
+                                z_imp=6.0, coordinate="psi_n", zeff_rule=dict(override="vb"), n_fast="none",
+                                ti_coverage=TI_COV)
 
 
 def test_no_default_and_bad_inputs_are_refused():
@@ -270,12 +276,12 @@ def test_quasineutrality_with_fast_ions_and_zeff_identity():
     x, ne, te, ti, nf = _kin_arrays()
     zvb = 1.8 + 0.4 * x
     k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"vb": ("zeff", zvb)}, zeff_source="vb", z_imp=6.0,
-                                   n_fast=nf, n_fast_source="provider")
+                                   n_fast=nf, n_fast_source="provider", ti_coverage=TI_COV)
     np.testing.assert_allclose(k.ni + 6.0 * k.nimp + k.n_fast, ne, rtol=1e-14)                       # (K1)
     np.testing.assert_allclose((k.ni + 36.0 * k.nimp + k.n_fast) / ne, zvb, rtol=1e-13)               # (K2)
     # the fast ions are removed from the thermal ions, not from the impurity
     k0 = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"vb": ("zeff", zvb)}, zeff_source="vb", z_imp=6.0,
-                                    n_fast="none")
+                                    n_fast="none", ti_coverage=TI_COV)
     np.testing.assert_allclose(k0.ni - k.ni, nf, rtol=1e-12)
     np.testing.assert_allclose(k0.nimp, k.nimp, rtol=1e-14)
     assert k0.provenance["n_fast"] == "declared by the caller: no fast ions"
@@ -297,7 +303,8 @@ def test_zeff_source_is_required_and_disagreement_recorded():
     cands = {"vb": ("zeff", zvb), "cer": ("impurity_density", nc)}
     with pytest.raises(ValueError, match="no\\s+default"):
         KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=cands, zeff_source=None, z_imp=6.0)
-    k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=cands, zeff_source="cer", z_imp=6.0, n_fast="none")
+    k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=cands, zeff_source="cer", z_imp=6.0, n_fast="none",
+                                   ti_coverage=TI_COV)
     np.testing.assert_allclose(k.zeff, 1.6, rtol=1e-13)
     d = k.record["pairwise_disagreement"]["cer vs vb"]
     assert d["median_rel"] == pytest.approx(1.6 / 2.4 - 1.0, rel=1e-12)
@@ -307,14 +314,14 @@ def test_kinetic_refusals_without_clipping():
     x, ne, te, ti, nf = _kin_arrays()
     with pytest.raises(ValueError, match="< 1"):
         KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"z": ("zeff", np.full_like(x, 0.9))},
-                                   zeff_source="z", z_imp=6.0, n_fast="none")
+                                   zeff_source="z", z_imp=6.0, n_fast="none", ti_coverage=TI_COV)
     with pytest.raises(ValueError, match="<= 0"):
         KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"z": ("zeff", np.full_like(x, 1.5))},
-                                   zeff_source="z", z_imp=6.0, n_fast=0.99 * ne)
+                                   zeff_source="z", z_imp=6.0, n_fast=0.99 * ne, ti_coverage=TI_COV)
     with pytest.raises(ValueError, match="cover"):
         KI.assemble_kinetic_inputs(x[:40], ne[:40], te[:40], ti[:40],
                                    zeff_candidates={"z": ("zeff", np.full(40, 1.5))}, zeff_source="z", z_imp=6.0,
-                                   n_fast="none")
+                                   n_fast="none", ti_coverage=TI_COV)
 
 
 def test_psi_n_inputs_mapped_through_the_producers_table_or_kept():
@@ -322,11 +329,12 @@ def test_psi_n_inputs_mapped_through_the_producers_table_or_kept():
     tab = (np.linspace(0, 1, 101), np.sqrt(np.linspace(0, 1, 101)) ** 1.0)       # rho = sqrt(psi_N)
     z = {"z": ("zeff", np.full_like(x, 1.5))}
     k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=z, zeff_source="z", z_imp=6.0, coordinate="psi_n",
-                                   psi_n_to_rho=tab, mapping_source="the profile fit's equilibrium", n_fast="none")
+                                   psi_n_to_rho=tab, mapping_source="the profile fit's equilibrium", n_fast="none",
+                                   ti_coverage=TI_COV)
     assert k.coordinate == "rho_tor_norm" and "own table" in k.record["mapping"]
     np.testing.assert_allclose(k.profiles_at(rho=np.sqrt(0.36))["ne"], np.interp(0.36, x, ne), rtol=2e-3)
     k2 = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=z, zeff_source="z", z_imp=6.0, coordinate="psi_n",
-                                    n_fast="none")
+                                    n_fast="none", ti_coverage=TI_COV)
     assert k2.coordinate == "psi_n" and "ours" in k2.record["mapping"]
 
 
@@ -336,7 +344,8 @@ def _inputs():
     ne = 4e19 * (1.0 - 0.8 * x ** 2)
     te = 2e3 * (1.0 - 0.9 * x ** 2)
     return x, ne, te, 0.8 * te, dict(zeff_candidates={"vb": ("zeff", np.full_like(x, 1.8))}, zeff_source="vb",
-                                     z_imp=6.0, n_fast="none")
+                                     z_imp=6.0, n_fast="none",
+                                     ti_coverage=dict(points=dict(value=[1.5e3], psi_N=[0.2]), core_psi_n_max=None))
 
 
 def test_midplane_table_is_kept_and_stated_and_changes_no_profile():

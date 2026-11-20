@@ -155,9 +155,12 @@ result.record                      # every setting, default and diagnostic in ef
   `model_settings` (`kinetic.current_model.CurrentModelSettings`) and `speed` (`kinetic.speed.SpeedSettings`) are
   the helper package's own objects with their own defaults; nothing is renamed.
 
-Set the environment variable `GFORTRAN_UNBUFFERED_PRECONNECTED=y` before Python imports OpenFUSIONToolkit: the
-forward model reads the solver's per-iteration output (residual history, vertical stability coil current), and
-without it that output may arrive buffered. The record says which was the case (`history_capture`).
+Set the environment variable `GFORTRAN_UNBUFFERED_PRECONNECTED=y` before Python starts (or at the very top of a
+script, before numpy is imported: numpy's linear algebra library can load the Fortran runtime before
+OpenFUSIONToolkit does): the forward model reads the solver's per-iteration output (residual history, vertical
+stability coil current), and without it that output may arrive buffered. The record says whether the variable was
+set when OpenFUSIONToolkit was imported (`history_capture`). With buffered output a solve can fail to find its own
+iteration lines and stop with an error.
 
 ## What is device-specific: the machine module
 Everything device-specific is an argument: the mesh, the vertical stability coil pairing and the reference radius

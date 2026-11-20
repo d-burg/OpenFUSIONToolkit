@@ -144,7 +144,9 @@ result.record                      # every setting, default and diagnostic in ef
 - `measurements`: `kinetic.interfaces.MeasurementSet` (built by hand, by `kinetic.adapters.measurements_from_imas`
   from IMAS JSON, or by a machine module).
 - `kinetics`: `kinetic.kinetics.assemble_kinetic_inputs(...)` (on \f$ \rho_{tor,norm} \f$, with the checked
-  \f$ Z_{eff} \f$ source rule) or `kinetic.current_model.KineticProfiles` (on \f$ \hat{\psi} \f$).
+  \f$ Z_{eff} \f$ source rule and the required ion-temperature coverage check `ti_coverage`: a slice whose
+  \f$ T_i \f$ is not measured inside the boundary is refused unless an assumption is named) or
+  `kinetic.current_model.KineticProfiles` (on \f$ \hat{\psi} \f$).
 - `sources`: `kinetic.current_model.SourceProfiles` (`SourceProfiles(psi_n)` for none).
 - `boundary`: the anchor outline (R, Z) [m]; `F0` = \f$ R B_\phi \f$ [T m] signed; `start`: \f$ \psi \f$ on the mesh
   nodes (for example `kinetic.forward.psi_on_nodes` of a prior g-file). A new solver has no solved equilibrium to

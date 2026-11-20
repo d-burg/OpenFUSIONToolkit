@@ -45,6 +45,9 @@ TI = (0.17, 0.55, 4.0, 1.0, 1.7, 0.16, 1.0)        # keV
 ZEFF = (1.4, 1.5, 1.6, 3.6, 3.2, 0.1, 1.0)
 JPHI = (0.0, 0.11, 2.4, 1.1, 1.7, 0.011, 0.98)     # <j_phi> shape [MA/m^2] (amplitude set by Ip)
 SOL_DECAY = 0.05
+# the fit tests' truth (a 50 ms period at f = 0.37 of the opt-in periodic orbit) and noise seed
+_SEED = 20261110
+_F_TRUE, _RATE_TRUE = 0.37, 20.0
 _XS = np.linspace(0.0, 1.0, 4001)
 
 
@@ -153,6 +156,46 @@ def _build_equilibrium():
     gs.init_psi(0.5 * (rz[:, 0].max() + rz[:, 0].min()), 0.0, a, 0.5 * (rz[:, 1].max() - rz[:, 1].min()) / a, 0.3)
     gs.solve()        # OFT defaults: nl_tol 1e-6, urf 0.2, maxits 40 (raises if not converged)
     return gs, g
+
+
+#: Resolutions [m] of the coarse in-code mesh (plasma, coils, vessel, vacuum); the registered DIII-D-like mesh of the
+#: TokaMaker tests uses 0.02, 0.03, 0.04, 0.10
+COARSE_MESH_DX = (0.05, 0.06, 0.08, 0.20)
+
+
+def coarse_mesh(filename, dx=COARSE_MESH_DX):
+    """Build a coarse DIII-D-like mesh IN CODE from the device geometry of the TokaMaker DIII-D example
+    (``DIIID_geom.json``: limiter, vessel segments, F- and E-coils), with the region layout of that example's mesh
+    script and the resolutions ``dx``; save it to ``filename`` and return ``filename``."""
+    from OpenFUSIONToolkit.TokaMaker.meshing import gs_Domain, save_gs_mesh
+    plasma_dx, coil_dx, vv_dx, vac_dx = dx
+    with open(os.path.join(HERE, "DIIID_geom.json")) as fh:
+        geom = json.load(fh)
+    dom = gs_Domain()
+    dom.define_region("air", vac_dx, "boundary")
+    dom.define_region("plasma", plasma_dx, "plasma")
+    dom.define_region("vacuum", vv_dx, "vacuum", allow_xpoints=True)
+    for i, seg in enumerate(geom["vv"]):
+        dom.define_region(f"vv{i}", vv_dx, "conductor", eta=seg["eta"])
+    for key, coil in geom["coils"].items():
+        if key.startswith("ECOIL"):
+            for i, sub in enumerate(coil):
+                dom.define_region(f"{key}_{i}", coil_dx, "coil", coil_set=key, nTurns=sub["nturns"])
+        else:
+            dom.define_region(key, coil_dx, "coil", nTurns=coil["nturns"])
+    dom.add_polygon(geom["limiter"], "plasma", parent_name="vacuum")
+    dom.add_enclosed([1.75, 1.25], "vacuum")
+    for i, seg in enumerate(geom["vv"]):
+        dom.add_polygon(seg["pts"], f"vv{i}", parent_name="air")
+    for key, coil in geom["coils"].items():
+        if key.startswith("ECOIL"):
+            for i, sub in enumerate(coil):
+                dom.add_polygon(sub["pts"], f"{key}_{i}", parent_name="air")
+        else:
+            dom.add_polygon(coil["pts"], key, parent_name="air")
+    pts, lc, reg = dom.build_mesh()
+    save_gs_mesh(pts, lc, reg, dom.get_coils(), dom.get_conductors(), filename)
+    return filename
 
 
 def _sensors(gs):

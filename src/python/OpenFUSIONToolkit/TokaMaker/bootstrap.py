@@ -1044,8 +1044,9 @@ def solve_with_bootstrap(mygs,
     internal solver's previous/loaded value (`'psi_n'` if none)
     @param jphi_saw Input sawtooth toroidal current density [A/m$^2$] (array or profile dict), added without rescaling;
       with `saw_q_s` > 0 the sawtooth reset current is added to it (internal Fortran solver only)
-    @param kwargs Further TokaMaker.solve_bootstrap options (internal Fortran solver only, except `bs_model`, which
-      also selects the coefficients of the Python solve; not with `use_OMFIT_sauter`)
+    @param kwargs Further TokaMaker.solve_bootstrap options (internal Fortran solver only, except `bs_model`,
+      `ln_lambda_model` and `ion_charge_model`, which act on the Python solve as on the internal one; not with
+      `use_OMFIT_sauter`; with `ln_lambda_model` = 2 the Python solve keeps the floor of 10 of @ref calculate_ln_lambda)
     @result Dictionary of TokaMaker \f$j_\phi = \langle j_\phi \rangle\f$ profiles [A/m$^2$] (see
       doc_tokamaker_current_conventions) on `'psi_n'`: `'jphi_total'`, `'jphi_bs_raw'` (field-aligned, before
       isolation/scaling), `'jphi_pd_raw'` (p'G), `'jphi_bs'`, `'jphi_pd'` (= `'jphi_pd_raw'`) and `'jphi_ind'` (the last
@@ -1124,16 +1125,25 @@ def solve_with_bootstrap(mygs,
             raise NotImplementedError("p_fixed is only supported by the internal Fortran solver (use_python_solve=False)")
         if jphi_saw is not None or kwargs.get('saw_q_s'):
             raise NotImplementedError("jphi_saw / saw_q_s are only supported by the internal Fortran solver (use_python_solve=False)")
-        # bs_model selects the coefficients of this solve too (1 = Redl 2021, 2 = Sauter 1999)
-        bs_model = kwargs.get('bs_model')
-        if bs_model is None:
-            bs_model = 1
-        if isinstance(bs_model, (bool, numpy.bool_)) or not isinstance(bs_model, (int, numpy.integer)) \
-                or bs_model not in (1, 2):
-            raise ValueError("bs_model must be the integer 1 (Redl 2021) or 2 (Sauter 1999)")
+        # The three model options act on this solve too: bs_model (coefficients), ln_lambda_model (Coulomb
+        # logarithms) and ion_charge_model (ion charge in nu_i* and ln Lambda_ii)
+        def _model_option(name, meanings):
+            value = kwargs.get(name)
+            if value is None:
+                return 1
+            if isinstance(value, (bool, numpy.bool_)) or not isinstance(value, (int, numpy.integer)) \
+                    or value not in (1, 2):
+                raise ValueError("{0} must be the integer 1 ({1}) or 2 ({2})".format(name, *meanings))
+            return int(value)
+        bs_model = _model_option('bs_model', ('Redl 2021', 'Sauter 1999'))
+        ln_lambda_model = _model_option('ln_lambda_model', ('NRL', 'Sauter 1999'))
+        ion_charge_model = _model_option('ion_charge_model', ('Koh form', 'main-ion charge'))
         if use_OMFIT_sauter and bs_model != 1:
             raise ValueError("use_OMFIT_sauter evaluates OMFIT's Redl 2021 fits ('neo_2021'); "
                              "it cannot be combined with bs_model=2")
+        if use_OMFIT_sauter and (ln_lambda_model != 1 or ion_charge_model != 1):
+            raise ValueError("use_OMFIT_sauter evaluates OMFIT's own logarithms and ion charge; "
+                             "it cannot be combined with ln_lambda_model=2 or ion_charge_model=2")
         coefficient_model = 'sauter' if bs_model == 2 else 'redl'
 
     warn(
@@ -1246,17 +1256,19 @@ def solve_with_bootstrap(mygs,
                     dn_e_dpsi=dn_e_dpsi, dnis_dpsi=[dn_i_dpsi]
                 )[0]
             else:
-                # Coulomb logarithm: NRL formulary
+                # Coulomb logarithm: NRL formulary (ln_lambda_model = 1) or Sauter 1999 eqs. 18d-18e (2)
                 ln_le, ln_lii = calculate_ln_lambda(
                     Te, Ti, ne, ni, Zeff,
-                    electron_lnLambda_model='NRL',   # more accurate than Sauter
-                    ion_lnLambda_model='Zavg',       # consistent multi-species treatment
+                    electron_lnLambda_model='sauter' if ln_lambda_model == 2 else 'NRL',
+                    ion_lnLambda_model='unity' if ion_charge_model == 2 else 'Zavg',
                 )
 
-                # Ion collisionality: Koh multi-species formula
+                # Ion collisionality: Koh multi-species formula (ion_charge_model = 1) or main-ion charge (2)
                 Zdom = 1.0  # deuterium
                 Zavg = ne / ni
                 Zion = (Zdom**2 * Zavg * Zeff)**0.25
+                if ion_charge_model == 2:
+                    Zion = Zdom
                 nu_i_star = (4.90e-18 * numpy.abs(qvals) * R_geo * ni
                             * Zion**4 * ln_lii / (Ti**2 * eps**1.5))
 

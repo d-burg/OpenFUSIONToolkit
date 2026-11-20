@@ -606,8 +606,19 @@ def run_sauter_insolve(mesh_resolution, fe_order, mp_q):
         seen = []
 
         def _spy(**kw):
-            seen.append(kw.get('coefficient_model', 'redl'))
+            seen.append(kw)
             raise _Stop
+
+        def _python_solve_ops(kw, ion_charge_model):
+            '''Differences of one recorded evaluation from the main-ion nu_i* or the Koh one, from Sauter's electron
+            logarithm (eq. 18d) and from the main-ion ion logarithm (eq. 18e), all from the call's own arguments'''
+            charge = 1.0 if ion_charge_model == 2 else (kw['ne']/kw['ni'])*kw['Zeff']
+            nu_i = 4.90e-18*np.abs(kw['q'])*kw['R']*kw['ni']*charge*kw['ln_lambda_ii']/(kw['Ti']**2*kw['eps']**1.5)
+            ln_e = 31.3 - np.log(np.sqrt(kw['ne'])/kw['Te'])
+            ln_ii = 30.0 - np.log(np.sqrt(kw['ni'])/kw['Ti']**1.5)
+            return [float(np.max(np.abs(kw['nu_i_star_override']/nu_i - 1.0))),
+                    float(np.max(np.abs(kw['ln_lambda_e']/ln_e - 1.0))),
+                    float(np.max(np.abs(kw['ln_lambda_ii']/ln_ii - 1.0)))]
         py_args = dict(mygs=mygs, ne=ne, Te=Te, ni=ni, Ti=Te, Zeff=np.full(len(x), Zeff), Ip_target=setup['Ip_target'],
                        inductive_jphi=setup['inductive_jphi'], x=x, use_python_solve=True, verbose=False)
         redl_orig = bootstrap_mod.redl_bootstrap
@@ -618,13 +629,31 @@ def run_sauter_insolve(mesh_resolution, fe_order, mp_q):
                     bootstrap_mod.solve_with_bootstrap(**py_args, bs_model=model)
                 except _Stop:
                     pass
+            # ln_lambda_model and ion_charge_model reach the Python solve too
+            py_ops = ((1, 1), (2, 1), (1, 2), (2, 2))
+            for ln_model, ion_model in py_ops:
+                try:
+                    bootstrap_mod.solve_with_bootstrap(**py_args, ln_lambda_model=ln_model, ion_charge_model=ion_model)
+                except _Stop:
+                    pass
         finally:
             bootstrap_mod.redl_bootstrap = redl_orig
-        results['python_solve_models'] = seen == ['redl', 'redl', 'sauter']
+        results['python_solve_models'] = [kw.get('coefficient_model', 'redl') for kw in seen[:3]] == \
+            ['redl', 'redl', 'sauter']
+        results['python_solve_ops'] = {'{0:d}{1:d}'.format(*ops): _python_solve_ops(kw, ops[1])
+                                       for ops, kw in zip(py_ops, seen[3:])}
         results['python_solve_rejects'] = (_rejects(bootstrap_mod.solve_with_bootstrap, **py_args, bs_model=3)
                                            and _rejects(bootstrap_mod.solve_with_bootstrap, **py_args, bs_model=2.0)
                                            and _rejects(bootstrap_mod.solve_with_bootstrap, **py_args, bs_model=2,
-                                                        use_OMFIT_sauter=True))
+                                                        use_OMFIT_sauter=True)
+                                           and _rejects(bootstrap_mod.solve_with_bootstrap, **py_args,
+                                                        ln_lambda_model=3)
+                                           and _rejects(bootstrap_mod.solve_with_bootstrap, **py_args,
+                                                        ion_charge_model=True)
+                                           and _rejects(bootstrap_mod.solve_with_bootstrap, **py_args,
+                                                        ln_lambda_model=2, use_OMFIT_sauter=True)
+                                           and _rejects(bootstrap_mod.solve_with_bootstrap, **py_args,
+                                                        ion_charge_model=2, use_OMFIT_sauter=True))
     except Exception:
         import traceback
         traceback.print_exc()
@@ -642,7 +671,12 @@ def test_ITER_bootstrap_sauter_insolve(order):
     peak, and 3.5E-4 for the stored field-aligned part), the option is in the Fortran state and an invalid value
     from the C interface is refused, boot_reset restores the default, and the option is saved and loaded with the
     equilibrium, a file with an invalid value or without it loading the default. The deprecated Python solve
-    (use_python_solve=True) evaluates the coefficients of bs_model and rejects invalid values.
+    (use_python_solve=True) evaluates the coefficients of bs_model and rejects invalid values; it also takes
+    ln_lambda_model and ion_charge_model: its ion collisionality has the charge factor of the chosen
+    ion_charge_model (to round-off, bound 1E-12), its electron logarithm is Sauter's eq. 18d exactly with
+    ln_lambda_model = 2 and not with 1, and its ion logarithm is the main-ion eq. 18e exactly with
+    ion_charge_model = 2 and not with 1 (differences required to exceed 1E-4; measured 2.4E-2 for the electron and
+    1.7E-2 for the ion logarithm, and 5.6E-16 for the collisionality identity).
     '''
     results = mp_run(run_sauter_insolve, (1.0, order), timeout=300)
     assert results is not None
@@ -654,6 +688,11 @@ def test_ITER_bootstrap_sauter_insolve(order):
                 'loaded_old', 'python_solve_models', 'python_solve_rejects'):
         assert res[key], key
     assert res['n_removed'] == 1
+    print('python_solve_ops', res['python_solve_ops'])
+    for ops, (nu_i, ln_e, ln_ii) in res['python_solve_ops'].items():
+        assert nu_i < 1.0E-12, ops
+        assert (ln_e < 1.0E-14) if ops[0] == '2' else (ln_e > 1.0E-4), ops
+        assert (ln_ii < 1.0E-14) if ops[1] == '2' else (ln_ii > 1.0E-4), ops
 
 
 def _sauter_1999_literal(mygs, x, Te, Ti, ne, ni, Zeff, nimp=None):

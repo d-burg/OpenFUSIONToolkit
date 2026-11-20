@@ -255,8 +255,7 @@ NOISE_RETRY_STEPS = (-1.0,)
 
 #: Radial classes of the MSE chords in the ``steady_state_check`` record: edges of ``|R_chord - R_axis|`` [m] (core
 #: below the first, mid between, outer above the second); a reporting convention of that record only.  The values were
-#: chosen for a device of about 0.6 m minor radius; :func:`mse_by_radius` and :func:`steady_state_check` take other
-#: edges as the argument ``class_edges_m``.
+#: chosen for a device of about 0.6 m minor radius.
 MSE_RADIAL_CLASSES_M = (0.15, 0.35)
 STEADY_STATE_CHECK_NOTE = ("a record for the reader: the slice's model steady state with no fit, scored on the same "
                            "chords as the slice's own result; nothing reads it")
@@ -1443,41 +1442,40 @@ def _radial_coordinate(fm, kin):
     return get(getattr(kin, "midplane_radius", None))
 
 
-def mse_by_radius(fm, ms, class_edges_m=MSE_RADIAL_CLASSES_M):
-    """chi^2/N of the MSE chords of the solver's present equilibrium by ``|R - R_axis|`` class: core below
-    ``class_edges_m[0]``, mid between, outer above ``class_edges_m[1]`` [m] (default :data:`MSE_RADIAL_CLASSES_M`)."""
+def mse_by_radius(fm, ms):
+    """chi^2/N of the MSE chords of the solver's present equilibrium by ``|R - R_axis|`` class
+    (:data:`MSE_RADIAL_CLASSES_M`)."""
     tab = score(fm.gs, ms, groups=["mse"])
     g = ms.groups["mse"]
     use = np.asarray(tab.used("mse"), bool)
     res = np.asarray(tab.residual("mse"), float)
     ra = float(np.asarray(fm.gs.o_point, float)[0])
     d = np.abs(np.asarray(g.geometry["r"], float)[use] - ra)
-    e1, e2 = class_edges_m
-    out = dict(r_axis_m=ra, class_edges_m=list(class_edges_m))
+    e1, e2 = MSE_RADIAL_CLASSES_M
+    out = dict(r_axis_m=ra, class_edges_m=list(MSE_RADIAL_CLASSES_M))
     for name, m in (("core", d < e1), ("mid", (d >= e1) & (d <= e2)), ("outer", d > e2), ("all", np.ones_like(d, bool))):
         out[name] = dict(n=int(np.count_nonzero(m)), chi2_per_n=float(np.mean(res[m] ** 2)) if np.any(m) else None)
     return out
 
 
-def steady_state_check(fm, kin, src, cfg, params, ms, label, class_edges_m=MSE_RADIAL_CLASSES_M):
+def steady_state_check(fm, kin, src, cfg, params, ms, label):
     """RECORD that steers nothing (``steady_state_check``; on by default in single-slice fits and series): the
     slice's unfitted model steady state -- the consistent solve of ``params`` with the corrections zero, the core
     treatment of ``cfg``, the slice's own inputs and Ip target -- scored on the MSE chords by radius
-    (:func:`mse_by_radius` with ``class_edges_m``), next to the score of the solver's present state (the slice's own
-    result).  The solver's
+    (:func:`mse_by_radius`), next to the score of the solver's present state (the slice's own result).  The solver's
     state and probe correction are restored afterwards to the state found on entry.  Its solves are counted on the
     forward model as every solve is and stated here (``n_solves``); callers take their own counts before it.  Never
     raises."""
     try:
         if ms is None or "mse" not in ms.groups:
             return dict(computed=False, reason="no MSE group at this slice")
-        own = mse_by_radius(fm, ms, class_edges_m)
+        own = mse_by_radius(fm, ms)
         snap, pc = fm.snapshot(), fm.probe_correction.copy()
         n0, t0 = fm.n_solves, time.perf_counter()
         p = dict(params, a_corr=(0.0,) * len(cfg.corr_centers_rho), log_strength=None)
         try:
             r = _cm.consistent_solve(fm, kin, src, p, cfg, label=label)
-            ss = mse_by_radius(fm, ms, class_edges_m) if r.converged else None
+            ss = mse_by_radius(fm, ms) if r.converged else None
             stats = (r.solve.stats if r.solve is not None else {}) or {}
             st = dict(status=r.status, l_i=stats.get("l_i"), q_0=stats.get("q_0"), steady_state=ss)
         finally:

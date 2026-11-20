@@ -217,11 +217,19 @@ def _read_geqdsk(filename):
 def _write_fortran_block(stream, values):
     r'''! Write *values* in standard GEQDSK format (5 per line, 16 chars each)
 
+    Values whose magnitude is below 1E-99 are written as zero, as in the Fortran writer, since a three
+    digit exponent would widen the 16 character field; values of 1E100 or more raise `ValueError`.
+
     @param stream Open text stream to write to
     @param values 1-D sequence of floats to serialise
     '''
     for i, v in enumerate(values):
-        stream.write(f"{v:16.9E}")
+        if (v != 0.0) and (abs(v) < 1.E-99):
+            v = 0.0
+        field = f"{v:16.9E}"
+        if np.isfinite(v) and len(field) - field.rfind("E") > 4:
+            raise ValueError("Value {0} does not fit a gEQDSK field".format(v))
+        stream.write(field)
         if (i + 1) % 5 == 0:
             stream.write("\n")
     if len(values) % 5 != 0:

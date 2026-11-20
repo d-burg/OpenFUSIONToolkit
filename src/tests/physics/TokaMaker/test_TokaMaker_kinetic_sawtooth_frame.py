@@ -23,14 +23,21 @@ Bounds and their sources:
   The measured ratio after the fix is 0.5-0.7 %, the resolution of the estimator.  The sheet listed in the
   record must sit at the independent position to 1e-3 in rho (the interpolant error at 400 cells is ~h^2 = 6e-6
   in s).
+
+The independent reference integrals use ``scipy.integrate.cumulative_simpson`` (scipy >= 1.12); with an older
+scipy the module is skipped.
 """
 import numpy as np
 import pytest
-from scipy.integrate import cumulative_simpson
 
 from OpenFUSIONToolkit.TokaMaker.kinetic.diffusion import CurrentDiffusion, CurrentState, IpBoundary, PositiveFrameError
 from OpenFUSIONToolkit.TokaMaker.kinetic.geometry import FluxSurfaceGeometry
 from OpenFUSIONToolkit.TokaMaker.kinetic.sawtooth import _anderson, reconnect, reconnect_psi, solve_periodic_orbit
+
+try:
+    from scipy.integrate import cumulative_simpson
+except ImportError:
+    pytest.skip("needs scipy.integrate.cumulative_simpson (scipy >= 1.12)", allow_module_level=True)
 
 PHI_B = 1.0
 CF = PHI_B / (2.0 * np.pi)

@@ -58,6 +58,28 @@ def run_shell_command(command, timeout=10, env_vars=None):
     return result, errcode
 
 
+## @cond
+_NML_INT = re.compile(r"[+-]?\d+")
+_NML_REAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+## @endcond
+
+
+def _namelist_scalar(token):
+    r'''! Value of a single namelist token, read as a literal and never evaluated as code
+
+    @param token Token text
+    @result `str` for a quoted string, `int` for an integer, `float` for a real number; any other token
+    raises `ValueError`
+    '''
+    if len(token) >= 2 and token[0] in "'\"" and token[-1] == token[0]:
+        return token[1:-1].replace(2*token[0], token[0])
+    if _NML_INT.fullmatch(token):
+        return int(token)
+    if _NML_REAL.fullmatch(token):
+        return float(token)
+    raise ValueError("Not a namelist literal: {0}".format(token))
+
+
 def read_fortran_namelist(file0, silent=True, b_arr=False):
 	r'''Return a dictionary with the parameters in the namelist file (file0)
 
@@ -163,7 +185,7 @@ def read_fortran_namelist(file0, silent=True, b_arr=False):
 						if len(mult_block.split()) > 1:  #If longer than one entry, make it an array
 							data_dict[key_list[i]] = numpy.array(mult_block.split()).astype('float')
 						else:    #if it is one entry, make it a float or an integer
-							data_dict[key_list[i]] = eval(mult_block.split()[0])
+							data_dict[key_list[i]] = _namelist_scalar(mult_block.split()[0])
 
 					except:
 						data_dict[key_list[i]] = mult_block

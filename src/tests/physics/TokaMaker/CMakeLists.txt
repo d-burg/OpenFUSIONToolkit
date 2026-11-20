@@ -65,6 +65,7 @@ configure_file( test_TokaMaker_kinetic_boundary_displacement_sign.py ${CMAKE_CUR
 configure_file( test_TokaMaker_kinetic_cut_cells_and_taper_opt_in.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_diagnostics.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_fit_solver.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
+configure_file( test_TokaMaker_kinetic_forward_checks.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_fit_unit.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_flux_offset_and_hygiene.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_imas_adapter.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

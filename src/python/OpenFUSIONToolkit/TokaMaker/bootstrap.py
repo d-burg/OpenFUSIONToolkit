@@ -604,6 +604,47 @@ def calculate_ln_lambda(Te, Ti, ne, ni, Zeff=1.0,
     return ln_lambda_e, ln_lambda_ii
 
 
+def sauter_coefficients(fT, nu_e_star, nu_i_star, Zeff):
+    r'''! Bootstrap coefficients of Sauter et al., Phys. Plasmas 6, 2834 (1999), eqs. 14-17, with the + sign of
+    the \f$0.315\,\nu_{i*}^2 f_t^6\f$ term of \f$\alpha\f$ (eq. 17b) of the Erratum, Phys. Plasmas 9, 5140 (2002)
+
+    \f$Z = Z_{eff}\f$ in every coefficient, as the erratum states for these fits. Used by @ref redl_bootstrap with
+    `coefficient_model='sauter'`, whose `'jboot1'` assembly has the erratum's \f$(1-R_{pe})/R_{pe}\f$ factor in the
+    ion-temperature term; the erratum's main-ion charge in \f$\nu_{i*}\f$ and \f$\ln\Lambda_{ii}\f$ (eqs. 18c, 18e)
+    is up to the caller (in @ref redl_bootstrap `ion_collisionality_model='unity'`; in the solver
+    `ion_charge_model` = 2).
+
+    @param fT Trapped particle fraction \f$f_t\f$
+    @param nu_e_star Electron collisionality \f$\nu_{e*}\f$
+    @param nu_i_star Ion collisionality \f$\nu_{i*}\f$
+    @param Zeff Effective charge \f$Z_{eff}\f$
+    @result Dictionary of \f$L_{31}\f$ (eq. 14), \f$L_{32}\f$ (eq. 15) and its parts `'F32_ee'` and `'F32_ei'`,
+    \f$L_{34}\f$ (eq. 16), \f$\alpha\f$ and \f$\alpha_0\f$ (eq. 17)
+    '''
+    sq_e = numpy.sqrt(nu_e_star)
+
+    def F31(t):  # eq. 14a
+        return ((1.0 + 1.4/(Zeff + 1.0))*t - 1.9/(Zeff + 1.0)*t**2
+                + 0.3/(Zeff + 1.0)*t**3 + 0.2/(Zeff + 1.0)*t**4)
+    # Effective trapped fractions of eqs. 14b, 16b, 15d and 15e
+    X31 = fT/(1.0 + (1.0 - 0.1*fT)*sq_e + 0.5*(1.0 - fT)*nu_e_star/Zeff)
+    X34 = fT/(1.0 + (1.0 - 0.1*fT)*sq_e + 0.5*(1.0 - 0.5*fT)*nu_e_star/Zeff)
+    X = fT/(1.0 + 0.26*(1.0 - fT)*sq_e + 0.18*(1.0 - 0.37*fT)*nu_e_star/numpy.sqrt(Zeff))
+    Y = fT/(1.0 + (1.0 + 0.6*fT)*sq_e + 0.85*(1.0 - 0.37*fT)*nu_e_star*(1.0 + Zeff))
+    F32_ee = ((0.05 + 0.62*Zeff)/(Zeff*(1.0 + 0.44*Zeff))*(X - X**4)
+              + (X**2 - X**4 - 1.2*(X**3 - X**4))/(1.0 + 0.22*Zeff)
+              + 1.2/(1.0 + 0.5*Zeff)*X**4)
+    F32_ei = (-(0.56 + 1.93*Zeff)/(Zeff*(1.0 + 0.44*Zeff))*(Y - Y**4)
+              + 4.95/(1.0 + 2.48*Zeff)*(Y**2 - Y**4 - 0.55*(Y**3 - Y**4))
+              - 1.2/(1.0 + 0.5*Zeff)*Y**4)
+    alpha0 = -1.17*(1.0 - fT)/(1.0 - 0.22*fT - 0.19*fT**2)
+    w = nu_i_star**2*fT**6
+    alpha = (((alpha0 + 0.25*(1.0 - fT**2)*numpy.sqrt(nu_i_star))/(1.0 + 0.5*numpy.sqrt(nu_i_star)) + 0.315*w)
+             / (1.0 + 0.15*w))
+    return {'L31': F31(X31), 'L32': F32_ee + F32_ei, 'L34': F31(X34), 'alpha': alpha, 'alpha0': alpha0,
+            'F32_ee': F32_ee, 'F32_ei': F32_ei}
+
+
 def redl_bootstrap(
     psi_N=None,
     Te=None, Ti=None,
@@ -623,8 +664,20 @@ def redl_bootstrap(
     Zeff_override=None,          # <- add this back
     nu_e_star_override=None,      # <- NEW
     nu_i_star_override=None,      # <- NEW
+    coefficient_model='redl',
 ):
-    r'''! Bootstrap current via Redl et al., Phys. Plasmas 28, 022502 (2021)
+    r'''! Bootstrap current via Redl et al., Phys. Plasmas 28, 022502 (2021), or Sauter et al., Phys. Plasmas 6,
+    2834 (1999) with its Erratum, Phys. Plasmas 9, 5140 (2002)
+
+    The internal solver (@ref TokaMaker.TokaMaker.solve_bootstrap "solve_bootstrap",
+    @ref TokaMaker.TokaMaker.eval_bootstrap "eval_bootstrap") evaluates this formula with
+    `formula_form='jboot1'`, `use_legacy_L34=False`, `use_sign_q=False`, `ion_collisionality_model='Zavg_Zeff'`,
+    \f$|q|\f$, and the Coulomb logarithms of `calculate_ln_lambda(..., 'NRL', 'Zavg')`. The defaults here
+    differ (`'jB'`, \f$Z_{eff}^4\f$, \f$\ln\Lambda = 17\f$), which changes the current by several percent.
+    The solver's `bs_model` 1 or 2 is `coefficient_model` 'redl' or 'sauter': the two differ only in the fits
+    of \f$L_{31}, L_{32}, L_{34}\f$ and \f$\alpha\f$ (@ref sauter_coefficients); collisionalities and assembly are shared.
+    The solver's `ion_charge_model` = 2 (main-ion charge 1 in \f$\nu_{i*}\f$ and \f$\ln\Lambda_{ii}\f$, as the 2002
+    erratum) is `ion_collisionality_model='unity'` with the logarithms of `calculate_ln_lambda(..., 'unity')`.
 
     @param psi_N Normalized poloidal flux profile \f$\hat{\psi}\f$
     @param Te Electron temperature profile \f$T_e\f$ [eV]
@@ -646,15 +699,22 @@ def redl_bootstrap(
     @param dp_dpsi Derivative of total pressure w.r.t. \f$\psi\f$
     @param ln_lambda_e Electron Coulomb logarithm \f$\ln\Lambda_e\f$
     @param ln_lambda_ii Ion Coulomb logarithm \f$\ln\Lambda_{ii}\f$
-    @param use_legacy_L34 Use legacy L34 formula (see Redl Eq. 19)
+    @param use_legacy_L34 Use legacy L34 formula (see Redl Eq. 19; Redl fits only, not with 'sauter', whose
+    \f$L_{34}\f$ is Sauter eq. 16)
     @param use_sign_q Multiply by sign of \f$q\f$
-    @param ion_collisionality_model Model for ion collisionality ('Zeff', 'Koh', 'unity')
+    @param ion_collisionality_model Charge factor \f$Z^4\f$ of the ion collisionality: 'Zeff' (\f$Z_{eff}^4\f$),
+    'Koh' (\f$Z_{eff}\f$), 'Zavg_Zeff' (\f$(n_e/n_i) Z_{eff}\f$, the internal solver's form) or 'unity' (1)
     @param formula_form Use 'jB' (default) or 'jboot1' equation
     @param Zeff_override Override \f$Z_{eff}\f$ if set
     @param nu_e_star_override Override electron collisionality if set
     @param nu_i_star_override Override ion collisionality if set
-    @result Tuple (Redl \f$\langle j_{BS} \cdot B \rangle(\hat{\psi})\f$ [T A/m^2], coefficient dictionary)
+    @param coefficient_model Fits of \f$L_{31}, L_{32}, L_{34}, \alpha\f$: 'redl' (default) or 'sauter'
+    @result Tuple (\f$\langle j_{BS} \cdot B \rangle(\hat{\psi})\f$ [T A/m^2], coefficient dictionary)
     '''
+    if coefficient_model not in ('redl', 'sauter'):
+        raise ValueError("coefficient_model must be 'redl' or 'sauter'")
+    if use_legacy_L34 and coefficient_model == 'sauter':
+        raise ValueError("use_legacy_L34 is a Redl fit; it cannot be used with coefficient_model='sauter'")
 
     # Apply Zeff override if requested
     if Zeff_override is not None:
@@ -687,6 +747,9 @@ def redl_bootstrap(
     else:
         if ion_collisionality_model == 'Koh':
             nu_i_star = (4.90e-18 * q * R * ni * Zeff * ln_lambda_ii
+                         / (Ti**2 * eps**1.5))
+        elif ion_collisionality_model == 'Zavg_Zeff':
+            nu_i_star = (4.90e-18 * q * R * ni * (ne / ni) * Zeff * ln_lambda_ii
                          / (Ti**2 * eps**1.5))
         elif ion_collisionality_model == 'unity':
             nu_i_star = (4.90e-18 * q * R * ni * 1.0 * ln_lambda_ii
@@ -778,6 +841,11 @@ def redl_bootstrap(
          / (1 + 0.18 * numpy.sqrt(nu_i_star))
          - 0.002 * nu_i_star**2 * fT**6)
         / (1 + 0.004 * nu_i_star**2 * fT**6))
+
+    if coefficient_model == 'sauter':  # The Sauter 1999 fits replace the four Redl fits; the rest is shared
+        sc = sauter_coefficients(fT, nu_e_star, nu_i_star, Zeff)
+        L31, L32, L34, alpha, alpha0, F32_ee, F32_ei = (sc[k] for k in ('L31', 'L32', 'L34', 'alpha', 'alpha0',
+                                                                        'F32_ee', 'F32_ei'))
 
     # =====================================================================
     # 5. Assemble
@@ -976,7 +1044,9 @@ def solve_with_bootstrap(mygs,
     internal solver's previous/loaded value (`'psi_n'` if none)
     @param jphi_saw Input sawtooth toroidal current density [A/m$^2$] (array or profile dict), added without rescaling;
       with `saw_q_s` > 0 the sawtooth reset current is added to it (internal Fortran solver only)
-    @param kwargs Further TokaMaker.solve_bootstrap options (internal Fortran solver only)
+    @param kwargs Further TokaMaker.solve_bootstrap options (internal Fortran solver only, except `bs_model`,
+      `ln_lambda_model` and `ion_charge_model`, which act on the Python solve as on the internal one; not with
+      `use_OMFIT_sauter`; with `ln_lambda_model` = 2 the Python solve keeps the floor of 10 of @ref calculate_ln_lambda)
     @result Dictionary of TokaMaker \f$j_\phi = \langle j_\phi \rangle\f$ profiles [A/m$^2$] (see
       doc_tokamaker_current_conventions) on `'psi_n'`: `'jphi_total'`, `'jphi_bs_raw'` (field-aligned, before
       isolation/scaling), `'jphi_pd_raw'` (p'G), `'jphi_bs'`, `'jphi_pd'` (= `'jphi_pd_raw'`) and `'jphi_ind'` (the last
@@ -1055,6 +1125,26 @@ def solve_with_bootstrap(mygs,
             raise NotImplementedError("p_fixed is only supported by the internal Fortran solver (use_python_solve=False)")
         if jphi_saw is not None or kwargs.get('saw_q_s'):
             raise NotImplementedError("jphi_saw / saw_q_s are only supported by the internal Fortran solver (use_python_solve=False)")
+        # The three model options act on this solve too: bs_model (coefficients), ln_lambda_model (Coulomb
+        # logarithms) and ion_charge_model (ion charge in nu_i* and ln Lambda_ii)
+        def _model_option(name, meanings):
+            value = kwargs.get(name)
+            if value is None:
+                return 1
+            if isinstance(value, (bool, numpy.bool_)) or not isinstance(value, (int, numpy.integer)) \
+                    or value not in (1, 2):
+                raise ValueError("{0} must be the integer 1 ({1}) or 2 ({2})".format(name, *meanings))
+            return int(value)
+        bs_model = _model_option('bs_model', ('Redl 2021', 'Sauter 1999'))
+        ln_lambda_model = _model_option('ln_lambda_model', ('NRL', 'Sauter 1999'))
+        ion_charge_model = _model_option('ion_charge_model', ('Koh form', 'main-ion charge'))
+        if use_OMFIT_sauter and bs_model != 1:
+            raise ValueError("use_OMFIT_sauter evaluates OMFIT's Redl 2021 fits ('neo_2021'); "
+                             "it cannot be combined with bs_model=2")
+        if use_OMFIT_sauter and (ln_lambda_model != 1 or ion_charge_model != 1):
+            raise ValueError("use_OMFIT_sauter evaluates OMFIT's own logarithms and ion charge; "
+                             "it cannot be combined with ln_lambda_model=2 or ion_charge_model=2")
+        coefficient_model = 'sauter' if bs_model == 2 else 'redl'
 
     warn(
         "The Python bootstrap solve (use_python_solve=True) is deprecated; use mygs.solve_bootstrap() "
@@ -1166,17 +1256,19 @@ def solve_with_bootstrap(mygs,
                     dn_e_dpsi=dn_e_dpsi, dnis_dpsi=[dn_i_dpsi]
                 )[0]
             else:
-                # Coulomb logarithm: NRL formulary
+                # Coulomb logarithm: NRL formulary (ln_lambda_model = 1) or Sauter 1999 eqs. 18d-18e (2)
                 ln_le, ln_lii = calculate_ln_lambda(
                     Te, Ti, ne, ni, Zeff,
-                    electron_lnLambda_model='NRL',   # more accurate than Sauter
-                    ion_lnLambda_model='Zavg',       # consistent multi-species treatment
+                    electron_lnLambda_model='sauter' if ln_lambda_model == 2 else 'NRL',
+                    ion_lnLambda_model='unity' if ion_charge_model == 2 else 'Zavg',
                 )
 
-                # Ion collisionality: Koh multi-species formula
+                # Ion collisionality: Koh multi-species formula (ion_charge_model = 1) or main-ion charge (2)
                 Zdom = 1.0  # deuterium
                 Zavg = ne / ni
                 Zion = (Zdom**2 * Zavg * Zeff)**0.25
+                if ion_charge_model == 2:
+                    Zion = Zdom
                 nu_i_star = (4.90e-18 * numpy.abs(qvals) * R_geo * ni
                             * Zion**4 * ln_lii / (Ti**2 * eps**1.5))
 
@@ -1184,7 +1276,7 @@ def solve_with_bootstrap(mygs,
                 nu_e_star = (6.921e-18 * numpy.abs(qvals) * R_geo * ne
                             * Zeff * ln_le / (Te**2 * eps**1.5))
 
-                jdotB_bs, _ = redl_bootstrap( # native re-implementation of Redl 2021
+                jdotB_bs, _ = redl_bootstrap( # Redl 2021 or Sauter 1999 coefficients (bs_model)
                     psi_N=psi_N, Te=Te, Ti=Ti, ne=ne, ni=ni,
                     pe=EC*(ne*Te), pi=EC*(ni*Ti),
                     Zeff=Zeff, R=R_geo, q=qvals, eps=eps, fT=ft, I_psi=f,
@@ -1197,6 +1289,7 @@ def solve_with_bootstrap(mygs,
                     use_legacy_L34=False, # L34 = L31 (correct Redl 2021)
                     use_sign_q=False, # <j.B> is odd in F through I_psi
                     formula_form='jboot1', # no d(ln ne)=d(ln ni) assumption
+                    coefficient_model=coefficient_model,
                 )
 
             # Redl jdotB_bs -> TokaMaker jphi = <j_phi> (doc_tokamaker_current_conventions.md eq. A7):

@@ -3,8 +3,9 @@
 #
 # SPDX-License-Identifier: LGPL-3.0-only
 #------------------------------------------------------------------------------
-# TokaMaker tests: reconstruction constraint types (MSE, finite-length Mirnov, coil currents, used flag,
-# off-mesh report, constraint file precision), checked on the solved ITER reference equilibrium and in pure Python
+# TokaMaker tests: reconstruction constraint types (MSE, finite-length Mirnov, coil currents, saddle loops, pressure
+# inside and outside the plasma, used flag, off-mesh report, error file, constraint file precision), checked on the
+# solved ITER reference equilibrium and in pure Python
 import contextlib
 import ctypes
 import io
@@ -462,6 +463,128 @@ def test_recon_coil_default_and_total():
         assert res['err_mats'][False][i, 1] == res['raws'][name]
         assert res['err_mats'][True][i, 1] == res['totals'][name]
     assert abs(res['raws']['VS'] - res['targets']['VS']) <= 1.E-2*abs(res['targets']['VS'])
+
+
+# Saddle loop legs and pressure points: the first inside the plasma, the second outside it (inside the mesh)
+saddle_pts = np.array([[6.0, 0.5], [8.5, 0.5]])
+saddle_width = 0.5  # Toroidal extent [rad]
+saddle_val, saddle_err = 0.25, 0.5
+press_val, press_err = 1.0E3, 2.56E2  # Errors with exact reciprocals, so the weights are exact
+# Row order of `eval_error` (see `reconstruction.get_constraints`)
+row_flux = [0, 1]
+row_saddle = 3
+row_press = [4, 5]
+row_press_axis = 6
+
+
+def run_saddle_pressure_case(mp_q):
+    '''Flux loops at the saddle legs, a finite-length Mirnov sensor, the saddle loop, pressure rows inside and outside
+    the plasma and at the magnetic axis, the plasma current and one MSE chord, evaluated as a matrix and to the file'''
+    mygs, _ = solve_ITER_reference(1.0, 2)
+    if mygs is None:
+        mp_q.put(None)
+        return
+    myrecon = reconstruction(mygs, in_filename='fit_saddle_press.in', out_filename='fit_saddle_press.out')
+    for pt in saddle_pts:
+        myrecon.add_flux_loop(pt, 0.0, 1.0)
+    myrecon.add_Mirnov([6.0, 2.0], [0.6, 0.0, 0.8], 0.1, 0.01, length=0.25, n_avg=5)
+    myrecon.add_saddle(saddle_pts[0], saddle_pts[1], saddle_width, saddle_val, saddle_err)
+    for pt in saddle_pts:
+        myrecon.add_pressure(pt, press_val, press_err)
+    myrecon.add_pressure([-1.0, 0.0], press_val, press_err)  # Magnetic axis form (R < 0)
+    myrecon.set_Ip(1.5E7, 1.5E5)
+    myrecon.add_MSE(mse_points[0], mse_coef_sets[1], 0.1, 0.01)
+    myrecon.setup_constraints()
+    err_mat = myrecon.eval_error()
+    myrecon.eval_error(save_to_file=True)
+    file_mat = np.loadtxt(myrecon.out_file)
+    mp_q.put([{'err_mat': err_mat, 'file_mat': file_mat, 'psi_bounds': np.array(mygs.psi_bounds),
+               'psi_eval': mygs.get_field_eval('PSI').eval(saddle_pts)[:, 0],
+               'P_eval': mygs.get_field_eval('P').eval(saddle_pts)[:, 0]}])
+
+
+@pytest.fixture(scope='module')
+def saddle_pressure_results():
+    '''Results of `run_saddle_pressure_case` (one solve for the three tests below)'''
+    return mp_run(run_saddle_pressure_case, ())
+
+
+def test_recon_saddle(saddle_pressure_results):
+    r'''Saddle loop against \f$ -(\psi(p_1)-\psi(p_2)) w \f$ with the flux of each leg from (a) a flux loop at the
+    same point (same evaluation path) and (b) `get_field_eval('PSI')`; the weighted error is (value - model)/err.
+    Measured (release build, 2 threads): (a) 0 and (b) 0 (bitwise equal); the fluxes of the legs differ by a factor
+    2.7, a saddle that evaluates one leg twice gives 0.
+    Bounds: (a) 1E-14 relative (the flux of each leg recovered from the flux loop's 2 pi psi is within an ulp, and the
+    difference of the legs amplifies that by its condition number, 2.2 here); (b) 1E-12 relative (the point is
+    located by another routine, see `test_recon_mse_closed_form`).
+    '''
+    results = saddle_pressure_results
+    assert results is not None
+    err_mat, psi_eval = results[0]['err_mat'], results[0]['psi_eval']
+    psi_flux = err_mat[row_flux, 1]/(2.0*np.pi)
+    model = err_mat[row_saddle, 1]
+    ref_flux = -(psi_flux[0] - psi_flux[1])*saddle_width
+    ref_eval = -(psi_eval[0] - psi_eval[1])*saddle_width
+    # The legs see different fluxes, so a saddle that evaluates one leg twice (model 0) is far outside the bounds
+    assert abs(psi_flux[0] - psi_flux[1]) > 1.E-1*max(abs(psi_flux[0]), abs(psi_flux[1]))
+    assert abs(model - ref_flux) <= 1.E-14*abs(ref_flux)
+    assert abs(model - ref_eval) <= 1.E-12*abs(ref_eval)
+    assert err_mat[row_saddle, 0] == (saddle_val - model)/saddle_err
+    assert err_mat[row_saddle, 2] == saddle_val
+
+
+def test_recon_pressure_outside_plasma(saddle_pressure_results):
+    r'''Pressure rows inside and outside the plasma. The modeled signal (column 2) is the equilibrium's pressure at the
+    point, \f$ P(\psi) \f$, which is zero outside the plasma, as `get_field_eval('P')` returns it. The weighted error
+    (column 1) uses \f$ P(\psi) \f$ inside the plasma and, outside it, the guidance value
+    \f$ P_0 (\psi - \psi_a)/(\psi_0 - \psi_a) \f$ (negative), with \f$ P_0 \f$ the magnetic axis row's model and
+    \f$ \psi \f$ from a flux loop at the same point.
+    Measured (release build, 2 threads): model inside against `get_field_eval('P')` 0 (bitwise equal); outside the
+    model is 0 and the guidance value -1.5E5 Pa (-0.24 of the axis pressure), weighted error against the guidance
+    reference 0 (bitwise equal).
+    Bounds: inside 1E-12 relative (the point is located by another routine); weighted error outside 1E-14 relative
+    (psi from the flux loop within an ulp, amplified by the condition number of psi - psi_a, 6.8 here).
+    '''
+    results = saddle_pressure_results
+    assert results is not None
+    err_mat, P_eval = results[0]['err_mat'], results[0]['P_eval']
+    psi_a, psi_0 = results[0]['psi_bounds']
+    psi_flux = err_mat[row_flux, 1]/(2.0*np.pi)
+    # One point inside the plasma, one outside it
+    assert psi_0 > psi_a
+    assert psi_flux[0] > psi_a > psi_flux[1]
+    row_in, row_out = row_press
+    # Inside: model = P(psi) > 0, weighted error from the model
+    assert err_mat[row_in, 1] > 0.0
+    assert abs(err_mat[row_in, 1] - P_eval[0]) <= 1.E-12*P_eval[0]
+    assert err_mat[row_in, 0] == (press_val - err_mat[row_in, 1])/press_err
+    # Outside: model = P(psi) = 0, weighted error from the guidance value
+    assert P_eval[1] == 0.0
+    assert err_mat[row_out, 1] == 0.0
+    guidance = err_mat[row_press_axis, 1]/(psi_0 - psi_a)*(psi_flux[1] - psi_a)
+    assert guidance < 0.0
+    ref_err = (press_val - guidance)/press_err
+    assert abs(err_mat[row_out, 0] - ref_err) <= 1.E-14*abs(ref_err)
+    assert np.all(err_mat[row_press + [row_press_axis], 2] == press_val)
+
+
+def test_recon_eval_error_file(saddle_pressure_results):
+    '''`eval_error(save_to_file=True)` writes the rows of the error matrix (row number, weighted error, model, value,
+    3D correction) to `settings.outfile`, equal to the matrix to the 13 significant digits of the file format.
+    Measured (release build, 2 threads): up to 3.0E-13 relative.
+    Bound: 5.01E-13 relative (half a unit in the 13th digit is at most 5E-13 of the value, plus the reading).
+    '''
+    results = saddle_pressure_results
+    assert results is not None
+    err_mat, file_mat = results[0]['err_mat'], results[0]['file_mat']
+    assert file_mat.shape == (err_mat.shape[0], 5)
+    assert np.all(file_mat[:, 0] == np.arange(1, err_mat.shape[0]+1))
+    assert np.all(np.isfinite(err_mat))
+    # Weighted error and model differ in every row, so a column written in the place of the other is detected
+    scale = np.maximum(np.abs(err_mat[:, 0]), np.abs(err_mat[:, 1]))
+    assert np.all(np.abs(err_mat[:, 0] - err_mat[:, 1]) > 1.E-9*scale)
+    for j in range(4):
+        assert np.all(np.abs(file_mat[:, j+1] - err_mat[:, j]) <= 5.01E-13*np.abs(err_mat[:, j]))
 
 
 #============================================================================

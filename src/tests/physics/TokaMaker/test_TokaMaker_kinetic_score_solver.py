@@ -1,0 +1,451 @@
+#------------------------------------------------------------------------------
+# Flexible Unstructured Simulation Infrastructure with Open Numerics (Open FUSION Toolkit)
+#
+# SPDX-License-Identifier: LGPL-3.0-only
+#------------------------------------------------------------------------------
+"""TokaMaker tests: kinetic reconstruction, live-solver tests of ``OpenFUSIONToolkit.TokaMaker.kinetic.score``.
+
+A synthetic free-boundary equilibrium is solved on the DIII-D-like mesh of the
+TokaMaker tests, built in code (``kinetic_fit_testing._build_equilibrium``: the
+in-code L-mode boundary, analytic FF' and p' shapes), at OFT default solver
+settings.  A synthetic sensor set
+(flux loops and probes along the limiter, Ip, diamagnetic flux, all coil
+sets, a midplane MSE fan with made-up geometric coefficients, a vertical
+Thomson chord) is evaluated on it and the measurement set is built directly
+from arrays.  Checked:
+
+(a) closure: measurements with known Gaussian noise give chi^2/N within the
+    statistical band, per group and in total;
+(b) zero noise: residuals at machine precision;
+(c) sensitivity: a perturbed equilibrium (Ip +3 %, re-solved) scores worse;
+(d) no side effects: psi, coil currents, axis and psi bounds bit-identical
+    before and after ``score``; repeated scoring is bit-identical;
+plus a cross-check of the magnetics diagnostics against OFT's own
+reconstruction constraint evaluation (``reconstruction.eval_error``).
+
+``OFT_env`` is a per-process singleton, so all live work runs in ONE child
+interpreter (one thread) and writes JSON; the tests assert on it.
+
+Ported from the reconstruction's own tests (bodies, bounds and references unchanged; imports re-pointed to this
+package).  The original solves its equilibrium from a g-file that is not part of this repository; the equilibrium
+is built in code instead.  The tests assert bounds and engine-versus-solver agreement only, so no reference value
+had to be replaced.
+"""
+import json
+import os
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+
+from kinetic_fit_testing import _build_equilibrium, child_env  # noqa: F401  (in-code equilibrium)
+
+pytestmark = pytest.mark.slow
+_SEED = 20261110
+
+
+def _sensors(gs):
+    """Synthetic sensor geometry tied to the limiter of the mesh."""
+    lim = np.asarray(gs.lim_contour, dtype=float)
+    seg = np.r_[0.0, np.cumsum(np.hypot(*np.diff(lim, axis=0).T))]
+    def resample(n, inset):
+        s = np.linspace(0.0, seg[-1], n, endpoint=False)
+        p = np.column_stack((np.interp(s, seg, lim[:, 0]), np.interp(s, seg, lim[:, 1])))
+        t = np.column_stack((np.interp(s + 1e-3, seg, lim[:, 0]), np.interp(s + 1e-3, seg, lim[:, 1]))) - p
+        t /= np.hypot(t[:, 0], t[:, 1])[:, None]
+        c = np.array([1.75, 0.0])
+        d = c - p
+        d /= np.hypot(d[:, 0], d[:, 1])[:, None]
+        return p + inset * d, t
+    fl, _ = resample(40, 0.03)
+    pr, tan = resample(60, 0.015)
+    n_mse = 16
+    rm = np.linspace(1.78, 2.20, n_mse)
+    a1 = np.linspace(0.70, 0.95, n_mse)
+    coef = np.column_stack((a1, np.zeros(n_mse), np.zeros(n_mse), np.full(n_mse, 1.5e-6),
+                            np.full(n_mse, 0.05), np.linspace(0.2, 0.4, n_mse),
+                            -np.linspace(0.6, 0.8, n_mse), np.full(n_mse, 1.0e-7), np.zeros(n_mse)))
+    geo = {
+        "flux_loop": {"r": fl[:, 0], "z": fl[:, 1]},
+        "bpol_probe": {"r": pr[:, 0], "z": pr[:, 1], "direction_r": tan[:, 0],
+                       "direction_z": tan[:, 1]},
+        "ip": {}, "diamagnetic_flux": {},
+        "pf_current": {"coil_names": list(gs.coil_sets)},
+        "mse": {"r": rm, "z": np.full(n_mse, 0.04), "coefficients": coef},
+        "thomson_ne": {"r": np.full(40, 1.94), "z": np.linspace(-0.95, 0.95, 40)},
+        "thomson_te": {"r": np.full(40, 1.94), "z": np.linspace(-0.95, 0.95, 40)},
+    }
+    return geo
+
+
+def _ne(x):
+    return 4.5e19 * (1.0 - 0.6 * np.asarray(x) ** 2) + 0.5e19
+
+
+def _te(x):
+    return 2.5e3 * (1.0 - np.asarray(x)) ** 1.5 + 80.0
+
+
+def _er(r, z):
+    return 2.0e4 * np.exp(-((np.asarray(r) - 2.05) / 0.12) ** 2)
+
+
+def _sigma(name, v):
+    """Synthetic sigma model (an EFIT-like 'relative with floor' form)."""
+    a = np.abs(v)
+    floors = {"flux_loop": (0.03, 2e-3), "bpol_probe": (0.03, 1e-3), "ip": (0.005, 1e3),
+              "diamagnetic_flux": (0.03, 1e-5), "pf_current": (0.005, 100.0),
+              "mse": (0.0, 3.5e-3), "thomson_ne": (0.05, 1e18), "thomson_te": (0.07, 20.0)}
+    rel, floor = floors[name]
+    return np.maximum(rel * a, floor)
+
+
+def _measurement_set(eq, geo, rng=None):
+    from OpenFUSIONToolkit.TokaMaker.kinetic import diagnostics as diag
+    from OpenFUSIONToolkit.TokaMaker.kinetic.interfaces import ConstraintGroup, MeasurementSet
+    funcs = {"flux_loop": diag.flux_loop, "bpol_probe": diag.bpol_probe, "ip": diag.ip,
+             "diamagnetic_flux": diag.diamagnetic_flux, "pf_current": diag.pf_current,
+             "mse": lambda e, g: diag.mse(e, g, e_r=_er),
+             "thomson_ne": lambda e, g: diag.thomson_ne(e, g, _ne),
+             "thomson_te": lambda e, g: diag.thomson_te(e, g, _te)}
+    groups = {}
+    for name, f in funcs.items():
+        syn = f(eq, geo[name])
+        valid = np.isfinite(syn.value)
+        v = np.where(valid, syn.value, 0.0)
+        s = _sigma(name, v)
+        if rng is not None:
+            v = v + s * rng.standard_normal(v.shape)
+        groups[name] = ConstraintGroup(name=name, labels=[f"{name}_{i}" for i in range(v.size)],
+                                       measured=v, sigma=s, valid=valid, geometry=geo[name],
+                                       meta={"sigma_model": "synthetic_test", "er_corrected": False})
+    return MeasurementSet("synthetic", 1.0, 0.01, groups)
+
+
+def _state(gs):
+    cur, _ = gs.get_coil_currents()
+    return dict(psi=np.array(gs.get_psi(False)), coils=np.array([cur[k] for k in sorted(cur)]),
+                o_point=np.array(gs.o_point), psi_bounds=np.array(gs.psi_bounds))
+
+
+def _count_setups():
+    """Count the solver constraint set-ups from now on (a wrapper around reconstruction.setup_constraints)."""
+    from OpenFUSIONToolkit.TokaMaker import reconstruction as recon_module
+    cnt = {"n": 0}
+    orig = recon_module.reconstruction.setup_constraints
+
+    def counted(self):
+        cnt["n"] += 1
+        return orig(self)
+    recon_module.reconstruction.setup_constraints = counted
+    return cnt
+
+
+def _solver_holds_no_set(gs):
+    """True when the solver object holds no reconstruction constraint set (its error evaluation refuses with -102)."""
+    import ctypes
+    from OpenFUSIONToolkit.TokaMaker import reconstruction as recon_module
+    buf = np.zeros((4, 4096))           # room for any set, should one (wrongly) be held
+    flag = ctypes.c_int()
+    st = recon_module.tokamaker_recon_settings()
+    recon_module.tokamaker_recon_err(gs._tMaker_ptr, ctypes.c_bool(False),
+                                     ctypes.byref(st.get_c_struct(gs._oft_env)),
+                                     buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), ctypes.byref(flag))
+    return flag.value == -102
+
+
+def child(out):
+    from OpenFUSIONToolkit.TokaMaker.kinetic import diagnostics as diag
+    from OpenFUSIONToolkit.TokaMaker.kinetic.score import chi2_summary, score
+    import OpenFUSIONToolkit
+    rec = {"oft": os.path.abspath(OpenFUSIONToolkit.__file__)}
+    gs, g = _build_equilibrium()
+    rec["settings"] = dict(nl_tol=gs.settings.nl_tol, urf=gs.settings.urf, maxits=gs.settings.maxits)
+    geo = _sensors(gs)
+    kin = {"n_e": _ne, "t_e": _te, "e_r": _er}
+
+    clean = _measurement_set(gs, geo)
+    noisy = _measurement_set(gs, geo, rng=np.random.default_rng(_SEED))
+
+    # (d) side effects
+    before = _state(gs)
+    t0 = score(gs, noisy, kinetics=kin)
+    t1 = score(gs, noisy, kinetics=kin)
+    after = _state(gs)
+    rec["side_effect_identical"] = {k: bool(np.array_equal(before[k], after[k])) for k in before}
+    rec["repeat_identical"] = all(np.array_equal(t0.model[k], t1.model[k], equal_nan=True)
+                                  for k in t0.model)
+
+    # (a) closure
+    summ = chi2_summary(t0)
+    rec["closure"] = {k: list(v) for k, v in summ.items()}
+    rec["excluded"] = {k: len(v) for k, v in t0.excluded.items()}
+    rec["n_thomson_inside"] = int(np.count_nonzero(clean.groups["thomson_ne"].valid))
+
+    # (b) zero noise
+    tz = score(gs, clean, kinetics=kin)
+    rec["zero_noise_max_abs_residual"] = {k: float(np.max(np.abs(tz.residual(k)))) for k in tz.model}
+
+    # MSE without E_r differs from the E_r-including measurements
+    tn = score(gs, clean, kinetics={"n_e": _ne, "t_e": _te}, groups=["mse"])
+    rec["mse_chi2_without_er"] = tn.chi2("mse")
+
+    # cross-check against OFT's own constraint evaluation (reconstruction.eval_error)
+    from OpenFUSIONToolkit.TokaMaker.reconstruction import reconstruction
+    m = {k: clean.groups[k] for k in ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current")}
+    recon = reconstruction(gs)
+    for i in range(m["flux_loop"].measured.size):
+        recon.add_flux_loop([geo["flux_loop"]["r"][i], geo["flux_loop"]["z"][i]],
+                            m["flux_loop"].measured[i], m["flux_loop"].sigma[i])
+    for i in range(m["bpol_probe"].measured.size):
+        recon.add_Mirnov([geo["bpol_probe"]["r"][i], geo["bpol_probe"]["z"][i]],
+                         np.array([geo["bpol_probe"]["direction_r"][i], 0.0,
+                                   geo["bpol_probe"]["direction_z"][i]]),
+                         m["bpol_probe"].measured[i], m["bpol_probe"].sigma[i])
+    names = geo["pf_current"]["coil_names"]
+    recon.set_coil_currents({n: float(v) for n, v in zip(names, m["pf_current"].measured)},
+                            {n: float(s) for n, s in zip(names, m["pf_current"].sigma)})
+    recon.set_Ip(float(m["ip"].measured[0]), float(m["ip"].sigma[0]))
+    recon.set_DFlux(float(m["diamagnetic_flux"].measured[0]), float(m["diamagnetic_flux"].sigma[0]))
+    recon.setup_constraints()
+    err = recon.eval_error()
+    nfl, npr, nco = m["flux_loop"].measured.size, m["bpol_probe"].measured.size, len(names)
+    blocks = {"flux_loop": err[:nfl, 1], "bpol_probe": err[nfl:nfl + npr, 1],
+              "pf_current": err[nfl + npr:nfl + npr + nco, 1],
+              "ip": err[nfl + npr + nco:nfl + npr + nco + 1, 1],
+              "diamagnetic_flux": err[nfl + npr + nco + 1:, 1]}
+    # OFT's flux constraint evaluates +2*pi*psi_TM; ours is the IMAS -2*pi*psi_TM
+    blocks["flux_loop"] = -blocks["flux_loop"]
+    xc = {}
+    for k, v in blocks.items():
+        ours = m[k].measured
+        xc[k] = dict(max_abs=float(np.max(np.abs(v - ours))),
+                     max_rel=float(np.max(np.abs(v - ours) / np.maximum(np.abs(ours), 1e-30))))
+    rec["oft_crosscheck"] = xc
+    # OFT passes constraints through a text file: written with '{:E}' (7
+    # significant digits) by earlier builds, with the module's
+    # CON_FILE_REAL_FORMAT ('.16E', 17 digits) by later ones.  Evaluate ours at
+    # the locations/normals as the build writes them.
+    from OpenFUSIONToolkit.TokaMaker import reconstruction as recon_module
+    fmt = getattr(recon_module, "CON_FILE_REAL_FORMAT", "E")
+    rec["oft_constraint_file_format"] = fmt
+    rnd = np.vectorize(lambda v: float(f"{v:{fmt}}"))
+    g_fl = {"r": rnd(geo["flux_loop"]["r"]), "z": rnd(geo["flux_loop"]["z"])}
+    g_pr = {k: rnd(v) for k, v in geo["bpol_probe"].items()}
+    rec["oft_crosscheck_rounded_geometry"] = {
+        "flux_loop": float(np.max(np.abs(blocks["flux_loop"] - diag.flux_loop(gs, g_fl).value)
+                                  / np.abs(blocks["flux_loop"]))),
+        # OFT uses the normal as written (not renormalized); ours normalizes it
+        "bpol_probe": float(np.max(np.abs(blocks["bpol_probe"] - diag.bpol_probe(gs, g_pr).value
+                                          * np.hypot(g_pr["direction_r"], g_pr["direction_z"]))
+                                   / np.abs(blocks["bpol_probe"])))}
+    # coil currents: OFT's coil constraint omits the virtual VSC contribution
+    diff = blocks["pf_current"] - m["pf_current"].measured
+    rec["pf_current_diff_by_coil"] = {n: float(d) for n, d in zip(names, diff)}
+    recon.destroy_constraints()
+    rec["state_after_oft_eval_identical"] = {k: bool(np.array_equal(before[k], v))
+                                             for k, v in _state(gs).items()}
+
+    # the solver's reconstruction rows (score's default) against the engine's own diagnostics, row by row, on
+    # this equilibrium: modeled values in units of each channel's sigma, and the exclusion masks
+    import importlib
+    import time
+
+    score_mod = importlib.import_module("OpenFUSIONToolkit.TokaMaker.kinetic.score")   # the module (the package exports the function)
+    import dataclasses
+
+    from OpenFUSIONToolkit.TokaMaker.kinetic.interfaces import MeasurementSet
+    kin_noer = {"n_e": _ne, "t_e": _te}
+    og = dict(clean.groups)       # a stated MSE orientation and a reference flux loop (relative form)
+    og["mse"] = dataclasses.replace(og["mse"], meta=dict(og["mse"].meta, field_orientation=(-1.0, 1.0)))
+    og["flux_loop"] = dataclasses.replace(og["flux_loop"],
+                                          meta=dict(og["flux_loop"].meta, flux_reference="flux_loop_3"))
+    oriented = MeasurementSet("synthetic", 1.0, 0.01, og)
+    rows = {}
+    for label, ms, kk in (("noisy_er", noisy, kin), ("clean_no_er", clean, kin_noer),
+                          ("oriented_ref", oriented, kin_noer)):
+        t_s = time.perf_counter()
+        ts = score(gs, ms, kinetics=kk)
+        t_s = time.perf_counter() - t_s
+        score_mod.SOLVER_ROWS["on"] = False
+        try:
+            t_e = time.perf_counter()
+            te_ = score(gs, ms, kinetics=kk)
+            t_e = time.perf_counter() - t_e
+        finally:
+            score_mod.SOLVER_ROWS["on"] = True
+        r = {"wall_s_solver_rows": t_s, "wall_s_engine": t_e,
+             "solver_note": any("solver's reconstruction constraints" in n for n in ts.notes)}
+        for k in ts.model:
+            both = np.isfinite(ts.model[k]) & np.isfinite(te_.model[k])
+            d = np.abs(ts.model[k] - te_.model[k])[both]
+            r[k] = dict(max_abs_over_sigma=float(np.max(d / ms.groups[k].sigma[both])) if d.size else 0.0,
+                        max_rel=float(np.max(d / np.maximum(np.abs(te_.model[k][both]), 1e-300))) if d.size else 0.0,
+                        mask_equal=bool(np.array_equal(ts.model_valid[k], te_.model_valid[k])),
+                        chi2_solver=float(ts.chi2(k)), chi2_engine=float(te_.chi2(k)))
+        rows[label] = r
+    after_rows = _state(gs)
+    rec["solver_rows_side_effect_identical"] = {k: bool(np.array_equal(before[k], v)) for k, v in after_rows.items()}
+    rec["solver_rows_vs_engine"] = rows
+
+    # the kept constraint set (solver_rows.keep_constraints, the scope of fit.reconstruct and series.run_series): the
+    # values of the per-call set-up bit for bit, also after a switch of specification and back; set-ups only on a
+    # switch; no set left in the solver after the scope
+    from OpenFUSIONToolkit.TokaMaker.kinetic import solver_rows as srows
+    sets = [("noisy_er", noisy, kin), ("clean_no_er", clean, kin_noer), ("oriented_ref", oriented, kin_noer)]
+    per_call = {label: score(gs, ms, kinetics=kk).model for label, ms, kk in sets}
+    n_setup = _count_setups()
+    with srows.keep_constraints():
+        n0 = n_setup["n"]
+        kept = [(label, score(gs, ms, kinetics=kk).model) for label, ms, kk in sets + sets[:1] + sets[:1]]
+        rec["kept_setups"] = n_setup["n"] - n0        # 3 specifications, then a switch back, then none
+        rec["kept_live_inside"] = len(srows._LIVE)
+    rec["kept_equal_per_call"] = all(np.array_equal(m[k], per_call[label][k], equal_nan=True)
+                                     for label, m in kept for k in m)
+    rec["kept_live_after"] = len(srows._LIVE)
+    rec["kept_solver_holds_no_set_after"] = _solver_holds_no_set(gs)
+    rec["kept_side_effect_identical"] = {k: bool(np.array_equal(before[k], v)) for k, v in _state(gs).items()}
+
+    # (c) sensitivity: re-solve with Ip +3 %, score against the noisy set of the base.  A kept set made on the base
+    # equilibrium is evaluated on the re-solved one (it must read the current equilibrium)
+    kc = srows.keep_constraints()
+    kc.__enter__()
+    try:
+        tk0 = score(gs, noisy, kinetics=kin)
+        n0 = n_setup["n"]
+        gs.set_targets(Ip=1.03 * abs(g["ip"]), pax=g["pres"][0])
+        gs.solve()
+        tpk = score(gs, noisy, kinetics=kin)
+        rec["kept_resolve_setups"] = n_setup["n"] - n0
+    finally:
+        kc.__exit__(None, None, None)
+    tp = score(gs, noisy, kinetics=kin)
+    rec["perturbed"] = {k: list(v) for k, v in chi2_summary(tp).items()}
+    rec["kept_resolve_equal_per_call"] = all(np.array_equal(tpk.model[k], tp.model[k], equal_nan=True)
+                                             for k in tp.model)
+    rec["kept_resolve_moved"] = bool(not np.array_equal(tpk.model["flux_loop"], tk0.model["flux_loop"]))
+    with open(out, "w") as fh:
+        json.dump(rec, fh, indent=1)
+
+
+# ---------------------------------------------------------------------------
+# parent
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def result(tmp_path_factory):
+    d = tmp_path_factory.mktemp("kinrecon_score")
+    out = str(d / "result.json")
+    env = child_env()
+    proc = subprocess.run([sys.executable, os.path.abspath(__file__), out], cwd=str(d), env=env,
+                          capture_output=True, text=True, timeout=900)
+    if proc.returncode != 0 or not os.path.isfile(out):
+        pytest.fail(f"child failed ({proc.returncode}):\n{proc.stderr[-4000:]}")
+    with open(out) as fh:
+        return json.load(fh)
+
+
+def test_child_used_default_solver_settings(result):
+    assert result["settings"] == dict(nl_tol=1e-6, urf=0.2, maxits=40)
+
+
+def test_closure_chi2_per_point_in_band(result):
+    from scipy.stats import chi2
+    for name, (c, n, _) in result["closure"].items():
+        lo, hi = chi2.ppf(1e-4, n), chi2.ppf(1 - 1e-4, n)
+        assert lo <= c <= hi, f"{name}: chi2 {c:.3f} for {n} points outside [{lo:.2f}, {hi:.2f}]"
+    c, n, _ = result["closure"]["total"]
+    assert n >= 150    # 40 + 60 + 1 + 1 + 20 + 16 + 2 x (Thomson channels inside the LCFS)
+
+
+def test_zero_noise_residuals_machine_precision(result):
+    for name, r in result["zero_noise_max_abs_residual"].items():
+        assert r < 1e-9, f"{name}: {r}"
+
+
+def test_thomson_outside_lcfs_excluded(result):
+    assert 0 < result["n_thomson_inside"] < 40
+
+
+def test_mse_er_term_matters(result):
+    assert result["mse_chi2_without_er"] > 1.0
+
+
+#: Least factor by which the total chi-squared of the perturbed-Ip equilibrium must exceed the closure's
+#: (measured 9.6 on the in-code fixture).
+PERTURBED_SCORE_RATIO = 5.0
+
+
+def test_perturbed_equilibrium_scores_worse(result):
+    base, pert = result["closure"], result["perturbed"]
+    assert pert["total"][0] > PERTURBED_SCORE_RATIO * base["total"][0]
+    for name in ("flux_loop", "bpol_probe", "ip"):
+        assert pert[name][0] > base[name][0]
+
+
+def test_score_has_no_side_effects(result):
+    assert all(result["side_effect_identical"].values()), result["side_effect_identical"]
+    assert result["repeat_identical"]
+
+
+#: Agreement of the solver's reconstruction rows with the engine's diagnostics, in units of each channel's sigma:
+#: round-off (the two evaluate the same field at the same points by different call paths).
+SOLVER_ROWS_BOUND_SIGMA = 1.0e-9
+
+
+@pytest.mark.parametrize("label", ["noisy_er", "clean_no_er", "oriented_ref"])
+def test_solver_rows_equal_engine_diagnostics(result, label):
+    r = result["solver_rows_vs_engine"][label]
+    assert r["solver_note"]
+    for k in ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current", "mse"):
+        assert r[k]["mask_equal"], (k, r[k])
+        assert r[k]["max_abs_over_sigma"] < SOLVER_ROWS_BOUND_SIGMA, (k, r[k])
+    assert all(result["solver_rows_side_effect_identical"].values())
+
+
+def test_kept_constraint_set_equals_per_call_set_up(result):
+    # bit for bit, set up only when the specification changes, nothing left behind
+    assert result["kept_equal_per_call"]
+    assert result["kept_setups"] == 4
+    assert result["kept_live_inside"] == 1
+    assert result["kept_live_after"] == 0
+    assert result["kept_solver_holds_no_set_after"]
+    assert all(result["kept_side_effect_identical"].values())
+
+
+def test_kept_constraint_set_reads_the_current_equilibrium(result):
+    assert result["kept_resolve_setups"] == 0
+    assert result["kept_resolve_moved"]
+    assert result["kept_resolve_equal_per_call"]
+
+
+def test_magnetics_match_oft_constraint_evaluation(result):
+    xc = result["oft_crosscheck"]
+    # Ip and diamagnetic flux: same Fortran integrals, bit-identical.
+    for name in ("ip", "diamagnetic_flux"):
+        assert xc[name]["max_abs"] == 0.0, (name, xc[name])
+    # Flux loops and probes: OFT reads sensor locations from a text file
+    # (7 significant digits in earlier builds, 17 in later ones, recorded in
+    # 'oft_constraint_file_format'); at the locations as written they agree to
+    # round-off, at the exact locations to the rounding's effect (~1e-6 with 7
+    # digits).
+    for name, rel in result["oft_crosscheck_rounded_geometry"].items():
+        assert rel < 1e-10, (name, rel)
+    for name in ("flux_loop", "bpol_probe"):
+        assert xc[name]["max_rel"] < 1e-4, (name, xc[name])
+
+
+def test_coil_currents_differ_from_oft_only_by_vsc(result):
+    # OFT's coil constraint (fit_coil_eval) omits the virtual VSC part that
+    # get_coil_currents includes; the fixture puts the VSC on F9A/F9B only.
+    for name, d in result["pf_current_diff_by_coil"].items():
+        if name in ("F9A", "F9B"):
+            continue
+        assert d == 0.0, (name, d)
+    assert result["pf_current_diff_by_coil"]["F9A"] == pytest.approx(
+        -result["pf_current_diff_by_coil"]["F9B"], rel=1e-9)
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    child(sys.argv[1])

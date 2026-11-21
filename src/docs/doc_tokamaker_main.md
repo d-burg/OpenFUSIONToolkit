@@ -44,6 +44,7 @@ new meshes, see \ref doc_gs_main_mesh_ex.
 
 ### Equilibrium Reconstruction
  - \subpage doc_tMaker_ITER_ex4
+ - \subpage doc_tMaker_DIIID_ex5
 
 ### Dipole Equilibria
  - \subpage doc_tMaker_dipole_ex2
@@ -63,6 +64,9 @@ new meshes, see \ref doc_gs_main_mesh_ex.
 
 ### Deprecated workflows
  - \subpage doc_tMaker_ITER_ex4-legacy
+
+\section doc_gs_main_kinetic Kinetic equilibrium reconstruction
+ - \subpage doc_tokamaker_kinetic_reconstruction
 
 \section doc_gs_main_conv Conventions
  - \subpage doc_tokamaker_current_conventions

@@ -76,6 +76,7 @@ configure_file( test_TokaMaker_kinetic_mse_coefficients.py ${CMAKE_CURRENT_BINAR
 configure_file( test_TokaMaker_kinetic_on_mesh_index.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_orientation.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_pass_loop_safeguard.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
+configure_file( test_TokaMaker_kinetic_pressure_factor.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_pressure_frames.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_pressure_frames_solver.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )
 configure_file( test_TokaMaker_kinetic_probe_finite_length.py ${CMAKE_CURRENT_BINARY_DIR} COPYONLY )

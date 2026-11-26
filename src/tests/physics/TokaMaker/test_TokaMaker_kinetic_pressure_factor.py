@@ -10,7 +10,9 @@ profiles, the bootstrap current and the conductivity do not follow it; the facto
 fit and every written pressure.
 
 Ported from the reconstruction's own tests (bodies, bounds and references unchanged; imports re-pointed to this
-package; the fixture of the correction-return test file imported from its port).
+package; the fixture of the correction-return test file imported from its port).  Not ported: the original's
+check that the time-dependent series' fits leave ``s_press`` out of their free sets (the series driver is not part of
+this package; three lines of its first test).
 """
 import numpy as np
 import pytest
@@ -25,7 +27,7 @@ def test_default_and_parameter_specification():
     assert CM.DEFAULT_PARAMS["s_press"] == 1.0
     spec = FIT.PARAMETERS["s_press"]
     assert spec["prior"] == (1.0, FIT.PRESSURE_FACTOR_SIGMA) and spec["bounds"] == (0.5, 2.0)
-    assert "s_press" not in FIT.FitSettings().free               # not free by default
+    assert FIT.FitSettings().free == ("a_corr", "s_press")       # free by default in a single-slice fit
     assert FIT.FitSettings().max_step["s_press"] == 0.05
 
 

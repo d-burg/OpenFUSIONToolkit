@@ -252,7 +252,7 @@ def test_frozen_branch_keeps_the_first_assemblys_branch_for_the_whole_fit(monkey
 
 
 def test_fit_default_frees_the_correction_amplitude_only():
-    assert FIT.FitSettings().free == ("a_corr",)
+    assert FIT.FitSettings().free == ("a_corr", "s_press")
 
 
 def test_fit_refuses_the_sawtooth_parameters_on_the_default_core_treatment():

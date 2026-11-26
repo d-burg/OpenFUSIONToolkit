@@ -54,7 +54,10 @@ or ``None`` for none; there is no default, the value depends on the device's dia
 valid point inside the plasma boundary (or, criterion applied, none at psi_N <= ``core_psi_n_max``) has an ion
 temperature that is not measured there: it is refused (:class:`TiCoverageRefused`, with the check's record) unless the
 caller names an assumption for it (``"assumption": "equal_to_electron"``: ``T_i = T_e`` over the whole table, with a
-relative uncertainty the caller states).  An applied assumption is recorded (``record["ti_coverage"]``: assumed, the
+relative uncertainty the caller states; or ``"assumption": "ratio_to_electron"``: ``T_i = r T_e`` with the ratio
+``r`` the caller supplies on the table (``assumption_ratio``; e.g. the measured ``T_i/T_e`` of the neighboring covered
+slices interpolated in time), its relative uncertainty (a number or an array on the table) and a description of where
+the ratio comes from (``assumption_detail``, recorded as given)).  An applied assumption is recorded (``record["ti_coverage"]``: assumed, the
 rule, the radial range, the stated uncertainty), named in the provenance and warned about; it is never applied
 silently, and a named assumption on a covered slice is recorded and not applied.
 
@@ -74,8 +77,9 @@ equilibrium's ``(psi_N, rho)`` pair; the current model calls it on every pass.
 @ingroup doxy_oft_python
 '''
 
+import json
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -87,7 +91,7 @@ EC = 1.602176634e-19
 
 __all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_density", "COORDINATES",
            "CHECKED", "ZEFF_RULE_OPTIONS", "FAST_IONS_NONE", "ti_coverage_check", "TiCoverageRefused",
-           "TiCoverageWarning", "TI_COVERAGE_KEYS", "TI_ASSUMPTIONS", "TI_EQUAL_TO_ELECTRON", "TI_COVERED",
+           "TiCoverageWarning", "TI_COVERAGE_KEYS", "TI_ASSUMPTIONS", "TI_EQUAL_TO_ELECTRON", "TI_RATIO_TO_ELECTRON", "TI_COVERED",
            "TI_NOT_COVERED"]
 
 #: Coordinates a kinetic table can carry.
@@ -109,11 +113,15 @@ ZEFF_RULE_OPTIONS = ("psi_n", "slice_time", "slice_window", "override", "accept_
 _CANDIDATE_KEYS = ("kind", "value", "sigma", "fit_points", "raw_points", "provenance", "core_median_series")
 #: Keys of the ``ti_coverage`` argument of :func:`assemble_kinetic_inputs`: ``points`` and ``core_psi_n_max`` are
 #: required (``core_psi_n_max`` may be ``None``, stated), ``slice_window`` (required for points that carry times),
-#: ``assumption`` and ``assumption_sigma_rel`` optional.
-TI_COVERAGE_KEYS = ("points", "core_psi_n_max", "slice_window", "assumption", "assumption_sigma_rel")
-#: The assumption a caller may name for an ion temperature that is not measured inside the boundary: ``T_i = T_e``.
+#: ``assumption`` and ``assumption_sigma_rel`` optional; ``assumption_ratio`` and ``assumption_detail`` are required
+#: with, and allowed only with, the assumption ``"ratio_to_electron"``.
+TI_COVERAGE_KEYS = ("points", "core_psi_n_max", "slice_window", "assumption", "assumption_sigma_rel",
+                    "assumption_ratio", "assumption_detail")
+#: The assumptions a caller may name for an ion temperature that is not measured inside the boundary: ``T_i = T_e``,
+#: and ``T_i = r T_e`` with a ratio ``r`` the caller supplies on the table and describes.
 TI_EQUAL_TO_ELECTRON = "equal_to_electron"
-TI_ASSUMPTIONS = (TI_EQUAL_TO_ELECTRON,)
+TI_RATIO_TO_ELECTRON = "ratio_to_electron"
+TI_ASSUMPTIONS = (TI_EQUAL_TO_ELECTRON, TI_RATIO_TO_ELECTRON)
 #: Verdicts of :func:`ti_coverage_check`.
 TI_COVERED, TI_NOT_COVERED = "covered", "not_covered"
 
@@ -208,11 +216,34 @@ def _ti_coverage(x, coordinate, out, opts):
     rule, sig = opts.get("assumption"), opts.get("assumption_sigma_rel")
     if rule is not None and rule not in TI_ASSUMPTIONS:
         raise ValueError(f"ti_coverage assumption must be one of {TI_ASSUMPTIONS} (or omitted: refuse)")
-    if rule is not None and not (sig is not None and np.isfinite(float(sig)) and float(sig) > 0):
+    ratio, detail = opts.get("assumption_ratio"), opts.get("assumption_detail")
+    by_ratio = rule == TI_RATIO_TO_ELECTRON
+    if sig is not None:
+        sig = np.asarray(sig, dtype=float)
+        if sig.ndim and not (by_ratio and sig.shape == x.shape):
+            raise ValueError("ti_coverage: 'assumption_sigma_rel' must be one number (with the assumption "
+                             f"{TI_RATIO_TO_ELECTRON!r} it may be an array on the table)")
+    if rule is not None and not (sig is not None and np.all(np.isfinite(sig)) and np.all(sig > 0)):
         raise ValueError("ti_coverage: an assumption needs 'assumption_sigma_rel', the relative 1-sigma uncertainty "
                          "of the assumed T_i (> 0), stated by the caller")
     if rule is None and sig is not None:
         raise ValueError("ti_coverage: 'assumption_sigma_rel' is given without an assumption")
+    if not by_ratio and (ratio is not None or detail is not None):
+        raise ValueError(f"ti_coverage: 'assumption_ratio' and 'assumption_detail' belong to the assumption "
+                         f"{TI_RATIO_TO_ELECTRON!r} only")
+    if by_ratio:
+        if ratio is None or not isinstance(detail, dict) or not detail:
+            raise ValueError(f"ti_coverage: the assumption {TI_RATIO_TO_ELECTRON!r} needs 'assumption_ratio' (T_i/T_e "
+                             "on the table) and 'assumption_detail' (a dict saying where the ratio comes from, "
+                             "recorded as given)")
+        ratio = np.asarray(ratio, dtype=float)
+        if ratio.shape != x.shape or not (np.all(np.isfinite(ratio)) and np.all(ratio > 0)):
+            raise ValueError("ti_coverage: 'assumption_ratio' must be finite and > 0 at every point of the table")
+        try:
+            detail = json.loads(json.dumps(detail))
+        except (TypeError, ValueError) as err:
+            raise ValueError("ti_coverage: 'assumption_detail' must hold plain numbers, strings, lists and "
+                             "dicts") from err
     rec = ti_coverage_check(opts["points"], core_psi_n_max=opts["core_psi_n_max"],
                             slice_window=opts.get("slice_window"))
     rec["assumption_named"] = rule
@@ -225,13 +256,24 @@ def _ti_coverage(x, coordinate, out, opts):
         raise TiCoverageRefused(
             "ion temperature not measured inside the plasma boundary: " + rec["reason"] + "; refused (pass "
             f"ti_coverage={{..., 'assumption': {TI_EQUAL_TO_ELECTRON!r}, 'assumption_sigma_rel': <stated>}} to fit "
-            "it with T_i = T_e, recorded)", rec)
-    out["ti"] = out["te"].copy()
+            f"it with T_i = T_e, or the assumption {TI_RATIO_TO_ELECTRON!r} with a supplied T_i/T_e, recorded)", rec)
     rec["ti"] = "assumed"
-    rec["assumption"] = dict(rule=rule, statement="T_i = T_e", sigma_rel=float(sig),
-                             sigma_note="stated by the caller and recorded; the kinetic inputs carry no uncertainties",
-                             coordinate=coordinate, range=[float(x[0]), float(x[-1])], extent="the whole table")
-    warnings.warn(f"ion temperature ASSUMED (T_i = T_e, rule {rule!r}, stated relative 1-sigma {float(sig):g}) over "
+    note = "stated by the caller and recorded; the kinetic inputs carry no uncertainties"
+    if by_ratio:
+        out["ti"] = ratio * out["te"]
+        statement = "T_i = r T_e, r supplied by the caller"
+        sig_rec = float(sig) if not sig.ndim else [float(v) for v in sig]
+        sig_txt = f"{float(sig):g}" if not sig.ndim else f"{float(np.median(sig)):g} (median over the table)"
+        rec["assumption"] = dict(rule=rule, statement=statement, sigma_rel=sig_rec, sigma_note=note,
+                                 ratio=[float(v) for v in ratio], detail=detail, coordinate=coordinate,
+                                 range=[float(x[0]), float(x[-1])], extent="the whole table")
+    else:
+        out["ti"] = out["te"].copy()
+        statement, sig_txt = "T_i = T_e", f"{float(sig):g}"
+        rec["assumption"] = dict(rule=rule, statement=statement, sigma_rel=float(sig), sigma_note=note,
+                                 coordinate=coordinate, range=[float(x[0]), float(x[-1])], extent="the whole table")
+    rec["assumption"]["sigma_text"] = sig_txt
+    warnings.warn(f"ion temperature ASSUMED ({statement}, rule {rule!r}, stated relative 1-sigma {sig_txt}) over "
                   f"{coordinate} [{x[0]:g}, {x[-1]:g}]: not measured inside the boundary ({rec['reason']})",
                   TiCoverageWarning, stacklevel=3)
     return rec
@@ -292,10 +334,74 @@ class KineticInputs:
         q = self._coord(psi_n, rho)
         return {k: self._f(k)(q) for k in ("ne", "te", "ni", "ti", "zeff", "nimp", "n_fast")}
 
+    def with_temperature_factor(self, s):
+        """These inputs with BOTH temperatures multiplied by ``s`` (``T_e -> s T_e``, ``T_i -> s T_i``; densities and
+        ``Z_eff`` untouched): the kinetic inputs a fit sees at the temperature factor ``s`` (``s_temp`` of
+        :mod:`.fit`).  Everything computed from them (thermal pressure, bootstrap current, conductivity) follows.
+        ``s = 1`` returns this object itself; the copy's record and provenance name the factor."""
+        s = float(s)
+        if s == 1.0:
+            return self
+        if not (np.isfinite(s) and s > 0):
+            raise ValueError("the temperature factor must be finite and > 0")
+        cache = self.__dict__.setdefault("_scaled", {})
+        if s not in cache:
+            if len(cache) > 64:
+                cache.clear()
+            prov = dict(self.provenance)
+            for k in ("te", "ti"):
+                prov[k] = f"{prov.get(k, 'caller')}; MULTIPLIED by the fitted temperature factor {s:.6g}"
+            cache[s] = replace(self, te=self.te * s, ti=self.ti * s, provenance=prov,
+                               record=dict(self.record, temperature_factor=s))
+        return cache[s]
+
     def thermal_pressure_at(self, psi_n=None, rho=None):
         """(K5): ``e (n_e T_e + (n_i + n_imp) T_i)`` [Pa], full frame."""
         d = self.profiles_at(psi_n, rho)
         return EC * (d["ne"] * d["te"] + (d["ni"] + d["nimp"]) * d["ti"])
+
+
+def shift_electrons_to_separatrix_te(x, ne, te, te_sep_eV=80.0, x_sep=1.0, search=(0.9, 1.1)):
+    """Electron profiles shifted along their flux coordinate so that T_e has ``te_sep_eV`` at the separatrix.
+
+    For the caller that prepares kinetic inputs from fitted profiles (an OPT-IN step; nothing in the package calls it
+    by itself).  ``x``: the profiles' own flux coordinate (psi_N or rho_tor,norm), strictly increasing, which may run
+    past the separatrix ``x_sep``; ``ne``, ``te`` on it (non-finite values, as beyond the last fitted point, are left
+    out of the search and of the interpolation).  The point ``x_T`` where ``te`` falls through ``te_sep_eV`` is
+    searched inside ``search`` (the OUTERMOST crossing); the shifted profiles are ``f(x + (x_T - x_sep))`` for both
+    n_e and T_e (the same additive shift: they are measured on the same chords), so that ``te(x_sep) = te_sep_eV``.
+    Values asked for beyond the finite range take the end values (nothing is extrapolated).  Where ``te`` does not
+    cross the value inside ``search`` nothing is shifted and the record says so.
+
+    Returns ``(ne_shifted, te_shifted, record)`` on ``x``; the record holds the shift (``shift = x_sep - x_T``:
+    negative when the profiles move inward), ``x_T``, T_e at the separatrix before and after."""
+    x = np.asarray(x, float)
+    ne, te = np.asarray(ne, float), np.asarray(te, float)
+    if x.ndim != 1 or x.shape != ne.shape or x.shape != te.shape or np.any(np.diff(x) <= 0):
+        raise ValueError("x, ne, te must be 1-D arrays of the same length with x strictly increasing")
+    if not float(te_sep_eV) > 0.0:
+        raise ValueError("te_sep_eV must be positive")
+    ok = np.isfinite(ne) & np.isfinite(te)
+    xf, nf_, tf = x[ok], ne[ok], te[ok]
+    te0 = float(np.interp(x_sep, xf, tf))
+    rec = dict(te_sep_eV=float(te_sep_eV), x_sep=float(x_sep), search=[float(search[0]), float(search[1])],
+               te_at_separatrix_before_eV=te0, x_last_finite=float(xf[-1]), applied=False, shift=0.0,
+               rule="n_e and T_e read at x + (x_T - x_sep), x_T the outermost point in the search range where T_e "
+                    "falls through the value; end values beyond the finite range",
+               sign="shift negative: the profiles move inward")
+    w = np.where((xf[:-1] >= search[0]) & (xf[1:] <= search[1]) & (tf[:-1] > te_sep_eV) & (tf[1:] <= te_sep_eV))[0]
+    if not len(w):
+        rec["reason"] = f"T_e does not fall through {float(te_sep_eV):g} eV between x = {search[0]:g} and {search[1]:g}"
+        return ne.copy(), te.copy(), rec
+    i = int(w[-1])
+    x_t = float(xf[i] + (tf[i] - te_sep_eV) / (tf[i] - tf[i + 1]) * (xf[i + 1] - xf[i]))
+    dx = x_t - float(x_sep)
+    ne_s, te_s = ne.copy(), te.copy()
+    ne_s[ok] = np.interp(xf + dx, xf, nf_)
+    te_s[ok] = np.interp(xf + dx, xf, tf)
+    rec.update(applied=True, shift=-dx, x_of_te_sep=x_t, te_at_separatrix_after_eV=float(np.interp(x_sep, xf, te_s[ok])),
+               end_values_used=bool(xf[-1] + dx > xf[-1] or xf[0] + dx < xf[0]))
+    return ne_s, te_s, rec
 
 
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
@@ -336,7 +442,7 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         inputs are then placed by rho (``mapping_source`` names that equilibrium).
     ni_reference : array on x, optional
         A main-ion density from the producer (e.g. a transport code's), compared, never used.
-    midplane_radius : (psi_n, r_m) or (psi_n, r_m, source), optional
+    midplane_radius : (psi_n, r_m), (psi_n, r_m, source) or (psi_n, r_m, source, rho_tor_norm), optional
         The producing equilibrium's outboard-midplane major radius [m] against its psi_N (both strictly
         increasing, finite).  Kept on the result for the fit's radial-coordinate record (how far the fitted
         surfaces sit from the producer's in real space); it does not enter the model.  The record says
@@ -345,7 +451,8 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         Required (``None`` is refused): the ion-temperature coverage check of the slice (module docstring;
         :data:`TI_COVERAGE_KEYS`, :func:`ti_coverage_check`).  ``points``: the ion-temperature measurement points;
         ``core_psi_n_max``: a psi_N or ``None`` (stated); ``slice_window``: for points with times; ``assumption``
-        (:data:`TI_ASSUMPTIONS`) with ``assumption_sigma_rel``: used only when the slice is not covered.  A slice that
+        (:data:`TI_ASSUMPTIONS`) with ``assumption_sigma_rel`` (and, for ``"ratio_to_electron"``, ``assumption_ratio``
+        and ``assumption_detail``): used only when the slice is not covered.  A slice that
         is not covered, with no assumption named, raises :class:`TiCoverageRefused`.  Recorded in
         ``record["ti_coverage"]``.
     """
@@ -465,7 +572,7 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     prov.setdefault("ti", "caller")
     if ti_rec["ti"] == "assumed":
         a = ti_rec["assumption"]
-        prov["ti"] = (f"ASSUMED: T_i = T_e (rule {a['rule']!r}, stated relative 1-sigma {a['sigma_rel']:g}) over "
+        prov["ti"] = (f"ASSUMED: {a['statement']} (rule {a['rule']!r}, stated relative 1-sigma {a['sigma_text']}) over "
                       f"{a['coordinate']} [{a['range'][0]:g}, {a['range'][1]:g}]; not measured: {ti_rec['reason']}; "
                       f"the supplied T_i ({prov['ti']}) is not used")
     prov["zeff"] = f"candidate {zeff_source!r}"
@@ -517,6 +624,19 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
             raise ValueError("midplane_radius: psi_n and r_m must increase strictly (outboard midplane, r_m > 0)")
         mid = dict(psi_n=mp, r_m=mr, source=str(midplane_radius[2]) if len(midplane_radius) > 2 else
                    (mapping_source or "the producing equilibrium"))
+        # the table's own rho_tor,norm (a fourth element, or from psi_n_to_rho): read only by the fit's record of
+        # T_e at the reconstruction's separatrix in real space (fit.separatrix_te_record), never by the model
+        mrho = None
+        if len(midplane_radius) > 3 and midplane_radius[3] is not None:
+            mrho = np.asarray(midplane_radius[3], dtype=float)
+            if mrho.shape != mp.shape or not np.all(np.isfinite(mrho)) or np.any(np.diff(mrho) <= 0):
+                raise ValueError("midplane_radius: rho_tor_norm must be finite, strictly increasing and as long as psi_n")
+        elif psi_n_to_rho is not None:
+            tp_, tr_ = (np.asarray(v, dtype=float) for v in psi_n_to_rho)
+            if mp[0] >= tp_[0] - 1e-12 and mp[-1] <= tp_[-1] + 1e-12:
+                mrho = np.interp(mp, tp_, tr_)
+        if mrho is not None:
+            mid["rho_tor_norm"] = mrho
     rec["midplane_radius"] = ("not supplied" if mid is None else
                               f"supplied: {mid['source']}, {mp.size} points, psi_N {mp[0]:.4g} to {mp[-1]:.4g}")
     return KineticInputs(coordinate=coord, x=xs, ne=out["ne"], te=out["te"], ti=out["ti"], zeff=zeff, ni=ni,

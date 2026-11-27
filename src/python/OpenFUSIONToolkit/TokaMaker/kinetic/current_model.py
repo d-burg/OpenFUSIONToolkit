@@ -167,6 +167,8 @@ records is l_i(3).
 '''
 
 import contextvars
+import copy
+import pickle
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Sequence
@@ -174,6 +176,7 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
+from . import diffusion as _dif
 from . import sawtooth as _saw
 from ._jdotb_redl import EC, redl_jdotb
 from .conductivity import neoclassical_conductivity
@@ -1304,6 +1307,12 @@ def open_branch_log():
     return log, _ASSEMBLY_LOG.set(log)
 
 
+def reopen_branch_log(log):
+    """Open an existing branch log again (a fit completed after its log was closed, :func:`.fit.reconstruct`);
+    returns the token for :func:`close_branch_log`."""
+    return _ASSEMBLY_LOG.set(log)
+
+
 def close_branch_log(token):
     """Close the branch log opened with ``token`` (the log open before it is open again)."""
     _ASSEMBLY_LOG.reset(token)
@@ -1477,6 +1486,39 @@ class ConsistentResult:
     solve: Any
     record: Dict[str, Any]
     wall_s: float
+    #: the geometry evaluated on the converged state by the final (consistency-test) pass, with the kinetic inputs and
+    #: settings it was evaluated with (:func:`final_geometry_of`); None unless converged.  Not part of any record.
+    final_geometry: Optional[Dict[str, Any]] = None
+
+
+def _settings_values(cfg):
+    """The values of the current-model settings as bytes (exact comparison, arrays included)."""
+    return pickle.dumps(cfg.as_dict(), protocol=4)
+
+
+def final_geometry_of(res, snap):
+    """The geometry hand-off of a converged consistent solve ``res`` for ``snap``, a snapshot of the solver's state
+    taken after ``res`` returned (with nothing in between that changes the equilibrium other than restoring a copy of
+    it), to be passed as ``start_geometry`` to a :func:`consistent_solve` that starts from exactly ``snap``; None when
+    ``res`` holds no final geometry (:func:`consistent_solve`, "Geometry hand-off")."""
+    g = getattr(res, "final_geometry", None)
+    if g is None or snap is None:
+        return None
+    return dict(g, snap=snap)
+
+
+def _handed_geometry(start, start_geometry, kin, cfg):
+    """The geometry to use for pass 0 instead of evaluating it, or None (evaluate).  Only with the memo of pure
+    evaluations on, only for the very snapshot object it was paired with, the same kinetic-input object and the same
+    settings object with unchanged values; always a deep copy (a pass never shares objects with another)."""
+    g = start_geometry
+    if g is None or start is None or not _dif._SPEED_MEMO["on"]:
+        return None
+    if g.get("snap") is not start or g.get("kin") is not kin or g.get("cfg") is not cfg:
+        return None
+    if g.get("cfg_values") != _settings_values(cfg):
+        return None
+    return copy.deepcopy(g["lag"])
 
 
 def _state_change(a, b):
@@ -1514,7 +1556,7 @@ def _knot_input(asm, x_in_cmp):
 
 
 def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, label="consistent",
-                     initial_profiles=None, state_fn=None):
+                     initial_profiles=None, state_fn=None, start_geometry=None):
     """Iterate model evaluation and forward solve to full consistency (module docstring).
 
     ``fm`` is a :class:`.forward.ForwardModel`; ``start`` an optional snapshot (or psi array) to
@@ -1526,6 +1568,15 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
     before the loop ("pass -1"; recorded); it is a starting state, not part of the answer.
     ``state_fn(lag) -> CurrentState`` supplies the current state on each pass's geometry (the
     time-dependent path); without it the steady state / periodic orbit is used.
+
+    Geometry hand-off (no value changes; with the memo of pure evaluations on, :mod:`.speed`): a converged result
+    holds the geometry its final pass evaluated on the converged state (``final_geometry``), which the loop otherwise
+    discards.  ``start_geometry`` (:func:`final_geometry_of`: that geometry paired with a snapshot of the converged
+    state) is used for pass 0 -- a deep copy, instead of evaluating the same geometry again -- only when ``start`` is
+    that very snapshot object, the kinetic inputs at ``params`` are the same object it was evaluated with (the
+    ``s_temp`` = 1 path), ``cfg`` is the same settings object with unchanged values and no ``initial_profiles`` are
+    given; otherwise pass 0 evaluates as always.  Restoring a snapshot gives the solver a copy of the equilibrium the
+    geometry was evaluated on, so the evaluation would repeat the same arithmetic on the same state.
     Failures (a model failure, a solve that does not converge or verify, no consistency within
     ``max_passes``, or a q-consistency failure once the profiles have converged) are returned with
     ``converged=False`` and the reason; the solver is then left in its last state (the caller
@@ -1571,9 +1622,16 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
         if beta is None:
             return {}
         return dict(robustness=dict(pass_relaxation=beta, pass_relaxation_note=PASS_RELAXATION_NOTE))
+    t_h = time.perf_counter()
+    handed = None if initial_profiles is not None else _handed_geometry(start, start_geometry, kin, cfg)
+    if handed is not None:
+        handed["wall_s"] = round(time.perf_counter() - t_h, 4)      # the copy's time (a timing only)
     for k in range(int(cfg.max_passes)):
         try:
-            lag_k = evaluate_geometry(fm.gs, kin, cfg)
+            if k == 0 and handed is not None:
+                lag_k = handed
+            else:
+                lag_k = evaluate_geometry(fm.gs, kin, cfg)
             st_k = call_state_fn(state_fn, lag_k, params) if state_fn is not None else None
             asm_k = assemble(lag_k, kin, src, params, cfg, ipv, z0=z0, state=st_k)
         except (ModelFailure, ValueError, RuntimeError) as exc:
@@ -1604,10 +1662,11 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
                                                  reason=f"profiles consistent but q check failed: "
                                                         f"{(qrec or {}).get('max_rel', (qrec or {}).get('reason'))}"),
                                             round(time.perf_counter() - t0, 3))
+                fin_geo = dict(lag=lag_k, kin=kin, cfg=cfg, cfg_values=_settings_values(cfg))
                 return ConsistentResult(True, "consistent", k, used, lag, res,
                                         dict(passes=passes, criterion=crit, q_check=qrec,
                                              assembly_on_final_state=dict(dj=dj), **_opts()),
-                                        round(time.perf_counter() - t0, 3))
+                                        round(time.perf_counter() - t0, 3), final_geometry=fin_geo)
         prev_stats = None if res is None else res.stats
         x_in, mixed = asm_k["jphi_cmp"], False
         relaxed = False          # robustness options: the input is an under-relaxed (damped) step

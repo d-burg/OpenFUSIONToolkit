@@ -37,7 +37,8 @@ CENTERS = np.array([0.15, 0.3, 0.45, 0.6])
 def _default_fit(monkeypatch, ip=IP_MET, q_floor=1.0, free=("a_corr",), target_shift=0.03):
     """A fit on the DEFAULT core treatment (q floor, resistive, continuous) whose every evaluation is a real
     assembly on the fixture (no forward solve): the residuals are the scored model q at four radii against a target
-    (the default model's q plus a shift); Jacobian columns, trials and the noise solve all assemble."""
+    (the default model's q plus a shift); Jacobian columns, trials and the noise solve all assemble.  The moving
+    anchor target is named off (these tests are about the q floor)."""
     lag, kin, src = LR._fixture_inputs()
     kin = FU.SimpleNamespace(**vars(kin), source="toy")
     src = FU.SimpleNamespace(**vars(src), source="toy", convention={})
@@ -70,7 +71,7 @@ def _default_fit(monkeypatch, ip=IP_MET, q_floor=1.0, free=("a_corr",), target_s
     monkeypatch.setattr(FIT, "_consistent", consistent)
     monkeypatch.setattr(FIT._cm, "lagged_solve", lagged)
     monkeypatch.setattr(FIT, "residual_vector", residual_vector)
-    return FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=free))
+    return FIT.reconstruct(fm, kin, src, cfg, FU._fs(free=free))
 
 
 def _assert_same_fit(o, ref):
@@ -165,7 +166,7 @@ def test_floor_effect_is_a_record_that_cannot_change_a_fit(monkeypatch):
         FU._install(monkeypatch, fm)
         monkeypatch.setattr(CM, "floor_effect_record", fn)
         n0 = len(calls)
-        outs[name] = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=FU.SAW_FREE),
+        outs[name] = FIT.reconstruct(fm, kin, src, cfg, FU._fs(free=FU.SAW_FREE),
                                      params0=dict(log_strength=0.5, f=0.37))
         assert len(calls) == n0 + 1                       # made once, at the end
     ref = outs["real"]
@@ -259,4 +260,4 @@ def test_fit_refuses_the_sawtooth_parameters_on_the_default_core_treatment():
     lag, kin, src = LR._fixture_inputs()
     with pytest.raises(ValueError, match="opt-in sawtooth core treatments"):
         FIT.reconstruct(SimpleNamespace(ms=None), kin, src, CM.CurrentModelSettings(r0=GEO.R0),
-                        FIT.FitSettings(free=("log_strength", "a_corr")))
+                        FIT.FitSettings(free=("log_strength", "a_corr"), anchor_follow=False))

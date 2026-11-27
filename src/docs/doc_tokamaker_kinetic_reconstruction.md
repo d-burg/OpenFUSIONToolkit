@@ -72,10 +72,24 @@ converted to the plain surface average \f$ \langle j_\phi \rangle \f$ by the Gra
 | Parameter | Meaning | Prior (mean, sigma) |
 |---|---|---|
 | `a_corr` | the correction amplitudes (free by default) | (0, 0.02) |
+| `s_press` | pressure factor: the pressure of the force balance is `s_press` times the kinetic pressure (thermal plus scaled fast-ion); the profiles, bootstrap current and conductivity are not scaled (free by default; recorded as `pressure_factor`, flagged outside 0.9 to 1.1) | (1, 0.10), provisional |
 | `ip_rel` | plasma-current target relative to the measured \f$ I_p \f$ (joins automatically, `ip_target='fitted'`) | none; its datum is the \f$ I_p \f$ row |
 | `s_bs` | bootstrap multiplier | (1, 0.5) |
 | `s_cd` | driven-current multiplier | (1, 0.25) |
 | `s_pfast` | fast-ion pressure multiplier | (1, 0.2) |
+| `s_temp` | temperature factor on \f$ T_e \f$ and \f$ T_i \f$ (thermal pressure, bootstrap current and conductivity follow) | (1, 0.10) |
+
+The default free set is `FitSettings.free = ('a_corr', 's_press')`, with `ip_rel` joining as above.
+
+**Moving anchor target (on by default).** After the fit with the supplied outline as the anchor target, every
+point of the target moves half of the way to the solved boundary (`anchor_follow_fraction`) and the fit is repeated
+from the previous result; a move is kept only if the refit converges and the fitted groups' \f$ \chi^2 \f$ is lower,
+at most `anchor_follow_max_steps` = 8 moves. The anchor weight never changes, the supplied outline stays the
+reference of every boundary record, and every step is in the record (`anchor_follow`). `FitSettings(anchor_follow=
+False)` gives the fit of the supplied outline alone. By default the final covariance Jacobian is computed only for
+the fit that is returned (`anchor_follow_defer_final_jacobian`, a run-time option); the returned fit is the same as
+without it except when an earlier kept fit's final Jacobian would fail while a later one succeeds, which the record
+states.
 
 **Stated assumptions.**
 - Steady state: the ohmic current is the relaxed (steady-state) response; the slice carries no current history.
@@ -93,7 +107,8 @@ consistency loop (`pass_relaxation`), lagged Jacobian columns, the noise retry a
 any driven current from a built-in source model. Each is off by default and recorded when on.
 
 **Provisional defaults.** The anchor weight factor 3 (a lower factor fits the magnetics better and converges less
-often) and the q-floor level 1 are proposals still under validation.
+often), the q-floor level 1, the prior width of the pressure factor and its flag range are proposals still under
+validation.
 
 ## Internal inductance
 Two definitions are used and always named:
@@ -122,7 +137,8 @@ Two definitions are used and always named:
 - **Pressure frame.** TokaMaker solves with zero pressure at the boundary; the separatrix pressure is carried
   separately, and the g-file written by
   \ref OpenFUSIONToolkit.TokaMaker.reconstruction.kinetic_slice_result.save_geqdsk "save_geqdsk()" holds the full
-  pressure (TokaMaker's `lcfs_pressure`).
+  pressure (TokaMaker's `lcfs_pressure`); its record states the fitted pressure factor, for which the g-file format
+  has no field.
 
 ## Use
 ```python
@@ -183,7 +199,8 @@ the class does not import it.
 - **Wall time is minutes per slice, not seconds**: each Jacobian column is a full consistent solve of several
   free-boundary solves. A fit of one or two parameters takes about 100 to 130 solves: about 4 minutes on the
   registered DIII-D-like test mesh (one thread) and about 1 minute on a mesh with a 5 cm plasma resolution (two
-  threads); more free parameters cost proportionally more.
+  threads); more free parameters cost proportionally more, and the moving anchor target (default) repeats the fit
+  once per move (at most 8 moves; each refit starts from the previous result).
 - **The forked workers are not included.** Parallel Jacobian columns in worker processes
   (`SpeedSettings(column_workers > 1)`) are refused; the in-process speed options (on by default) change no value.
 - The solver offers no getter for the vertical stability coil current and the residual history; both are parsed

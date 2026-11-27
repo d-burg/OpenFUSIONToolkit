@@ -203,6 +203,7 @@ def test_end_to_end_geqdsk_written(result):
     g = result["geqdsk"]
     assert "error" not in g, g
     assert g["record"]["pressure_frame"] == "full"
+    assert g["record"]["pressure_factor"] == 1.0              # s_press not free here: its default value, stated
     assert (g["nr"], g["nz"]) == (65, 65)
     assert abs(g["ip"]) == pytest.approx(g["ip_fit"], rel=1e-6)
 
@@ -233,6 +234,33 @@ def test_settings_are_the_helper_package_defaults():
     assert r.speed is None and r.forward_model is None and r.gs is None
     given = FIT.FitSettings(free=("s_bs",))
     assert _recon(fit_settings=given).fit_settings is given
+
+
+def _result_with_center(s_press, p_sep=125.0):
+    """A ``kinetic_slice_result`` around a stand-in fit result whose final center holds a stand-in equilibrium (its
+    ``save_eqdsk`` records the call) and an assembly with the pressure-factor record of ``s_press``."""
+    from types import SimpleNamespace
+    from OpenFUSIONToolkit.TokaMaker.kinetic import current_model as CM
+    from OpenFUSIONToolkit.TokaMaker.reconstruction import kinetic_slice_result
+    calls = []
+    snap = SimpleNamespace(save_eqdsk=lambda filename, **kw: calls.append((filename, kw)))
+    res = SimpleNamespace(solve=SimpleNamespace(record=dict(p_sep=p_sep)),
+                          assembly=dict(pressure_factor=CM.pressure_factor_record(s_press)))
+    fit = SimpleNamespace(status="converged", record=dict(center=dict(snap=snap, res=res)))
+    return kinetic_slice_result(0.0, fit), calls
+
+
+@pytest.mark.parametrize("s_press", [1.0, 1.04])
+def test_save_geqdsk_states_the_fitted_pressure_factor(s_press):
+    r, calls = _result_with_center(s_press)
+    rec = r.save_geqdsk("g_fit", nr=33)
+    assert rec["pressure_factor"] == s_press and rec["p_sep"] == 125.0 and rec["pressure_frame"] == "full"
+    assert calls == [("g_fit", dict(nr=33, lcfs_pressure=125.0))]
+    with pytest.raises(ValueError, match="pressure factor"):
+        r.save_geqdsk("g_fit", pressure_factor=1.0)
+    with pytest.raises(ValueError, match="lcfs_pressure"):
+        r.save_geqdsk("g_fit", lcfs_pressure=1.0)
+    assert len(calls) == 1
 
 
 def test_machine_description_checked():

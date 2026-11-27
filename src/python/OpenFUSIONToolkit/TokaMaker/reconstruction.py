@@ -1442,17 +1442,24 @@ class kinetic_slice_result():
 
         The file carries the full pressure: `PRES` is the solver's pressure plus the separatrix pressure of the fit's
         final center (TokaMaker's `lcfs_pressure`), `PPRIME` is unchanged (`kinetic.pressure.save_full_pressure_eqdsk`).
+        The g-file format has no field for the pressure factor `s_press`: its value at the final center is kept in the
+        returned record (at a value other than 1 the written pressure is that factor times the pressure of the kinetic
+        profiles).
 
         @param filename Name of the g-file
         @param kwargs Passed unchanged to `TokaMaker_equilibrium.save_eqdsk` (grid, `lcfs_pad`, `cocos`, ...; its
-        defaults apply); `lcfs_pressure` is refused
-        @result Record of the written file (file name, separatrix pressure, pressure frame)
+        defaults apply); `lcfs_pressure` and `pressure_factor` are refused (both are the fit's own)
+        @result Record of the written file (file name, separatrix pressure, pressure frame, pressure factor)
         '''
         from .kinetic import pressure as kinetic_pressure
         center = self.fit.record.get('center')
         if center is None:
             raise ValueError('the fit has no consistent final center (status {0!r}): no equilibrium to write'.format(self.status))
-        return kinetic_pressure.save_full_pressure_eqdsk(center['snap'], filename, center['res'].solve.record['p_sep'], **kwargs)
+        if 'pressure_factor' in kwargs:
+            raise ValueError('the pressure factor is the fit\'s own (its final center); it cannot be passed')
+        asm = center['res'].assembly or {}
+        return kinetic_pressure.save_full_pressure_eqdsk(center['snap'], filename, center['res'].solve.record['p_sep'],
+                                                         pressure_factor=asm.get('pressure_factor'), **kwargs)
 
 
 class kinetic_reconstruction():

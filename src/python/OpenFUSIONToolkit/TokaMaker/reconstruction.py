@@ -1300,3 +1300,302 @@ class reconstruction():
         error_flag = c_int()
         tokamaker_recon_run(self._tMaker_obj._tMaker_ptr,c_bool(vacuum),ctypes.byref(self.settings.get_c_struct(self._tMaker_obj._oft_env)),ctypes.byref(error_flag))
         return error_flag.value
+
+
+#------------------------------------------------------------------------------
+# Kinetic equilibrium reconstruction of one time slice
+#------------------------------------------------------------------------------
+## Mode of @ref kinetic_reconstruction.run "kinetic_reconstruction.run()" implemented here
+KINETIC_MODES = ('slice',)
+## Modes of the later pull requests and what each will do
+KINETIC_MODES_LATER = {
+    'slices': 'many independent slices, each fitted as a single slice (a later pull request)',
+    'series': 'a time-dependent series with current diffusion between the slices (a later pull request)',
+}
+## Keys of the device description `machine` of @ref kinetic_reconstruction (`vsc` required)
+KINETIC_MACHINE_KEYS = ('name', 'vsc', 'r0')
+
+
+class kinetic_slice_data():
+    '''! Inputs of one time slice of a kinetic reconstruction
+
+    The inputs are the device-independent containers of the helper package
+    @ref OpenFUSIONToolkit.TokaMaker.kinetic "TokaMaker.kinetic"; they are handed to the fit unchanged (nothing is
+    computed, converted or copied here). A machine module builds them from a device's own files; a user with data in
+    standard form builds them directly. See \\ref doc_tokamaker_kinetic_reconstruction.
+    '''
+    def __init__(self, measurements, kinetics, sources, boundary, F0, start, coil_roles=None, reference_points=None,
+                 initial_profiles=None, params0=None):
+        r'''! Collect the inputs of one slice
+
+        @param measurements Measurements of the slice (`kinetic.interfaces.MeasurementSet`); its `time` [s] names the slice
+        @param kinetics Thermal kinetic profiles: `kinetic.kinetics.KineticInputs` (on rho_tor_norm, built by
+        `kinetic.kinetics.assemble_kinetic_inputs`) or `kinetic.current_model.KineticProfiles` (on psi_N)
+        @param sources Driven current and fast-ion pressure (`kinetic.current_model.SourceProfiles`; no sources:
+        `SourceProfiles(psi_n)`)
+        @param boundary Anchor of the forward solve: (R, Z) points [m] of a prior equilibrium's last closed flux surface,
+        shape (n, 2)
+        @param F0 Vacuum \f$ R B_\phi \f$ [T m], signed as the discharge
+        @param start Starting state of the fit: \f$ \psi \f$ on the mesh nodes [Wb/rad] in TokaMaker's convention (for
+        example `kinetic.forward.psi_on_nodes` of a prior equilibrium), or an equilibrium copy of the reconstruction's
+        own solver (a previous result's @ref kinetic_slice_result.equilibrium "equilibrium()")
+        @param coil_roles Coil name -> `'fitted'`, `'held'` or `'free'`; None: `measurements.groups['pf_current'].meta['coil_roles']`
+        @param reference_points Points of the anchor equilibrium that are only recorded (displacement of the fitted
+        boundary): `'x_points'` [(R, Z), ...] and `'strike_points'` {name: (R, Z)}
+        @param initial_profiles `(x, <j_phi>, p)` on psi_N for the first solve when `start` is only a guess
+        @param params0 Starting parameters of the fit (default: the prior means, `kinetic.fit.reconstruct`)
+        '''
+        ## Measurements of the slice (`MeasurementSet`)
+        self.measurements = measurements
+        ## Thermal kinetic profiles (`KineticInputs` or `KineticProfiles`)
+        self.kinetics = kinetics
+        ## Driven current and fast-ion pressure (`SourceProfiles`)
+        self.sources = sources
+        ## Anchor boundary points [m], shape (n, 2)
+        self.boundary = boundary
+        ## Vacuum \f$ R B_\phi \f$ [T m]
+        self.F0 = F0
+        ## Starting state (psi on the mesh nodes, or an equilibrium copy of the reconstruction's solver)
+        self.start = start
+        ## Coil roles (None: from the measurement set)
+        self.coil_roles = coil_roles
+        ## Recorded reference points of the anchor equilibrium
+        self.reference_points = reference_points
+        ## Profiles of the first solve
+        self.initial_profiles = initial_profiles
+        ## Starting parameters of the fit
+        self.params0 = params0
+
+    @property
+    def time(self):
+        '''! Time of the slice [s]: the measurement set's `time`'''
+        return self.measurements.time
+
+
+class kinetic_slice_result():
+    '''! Result of a single-slice kinetic reconstruction (@ref kinetic_reconstruction.run "kinetic_reconstruction.run()")
+
+    Holds the fit result of `kinetic.fit.reconstruct` unchanged (`fit`) and exposes its parts. `record` is the fit
+    record: every setting, prior, stopping test, solver setting and diagnostic in effect.
+    '''
+    def __init__(self, time, fit):
+        '''! Wrap a fit result
+
+        @param time Time of the slice [s]
+        @param fit `kinetic.fit.FitResult` returned by `kinetic.fit.reconstruct`
+        '''
+        ## Time of the slice [s]
+        self.time = time
+        ## The fit result of `kinetic.fit.reconstruct`, unchanged
+        self.fit = fit
+
+    @property
+    def status(self):
+        '''! Status of the fit (`converged`, `converged_within_noise`, `stalled_no_significant_descent`, ...)'''
+        return self.fit.status
+
+    @property
+    def record(self):
+        '''! The fit record (dict)'''
+        return self.fit.record
+
+    @property
+    def params(self):
+        '''! All model parameters at the fitted state (dict)'''
+        return self.fit.params
+
+    @property
+    def free(self):
+        '''! Names of the fitted parameters'''
+        return self.fit.free
+
+    @property
+    def theta(self):
+        '''! Fitted values of the free parameters'''
+        return self.fit.theta
+
+    @property
+    def sigma(self):
+        '''! Laplace (posterior) standard deviations of the free parameters'''
+        return self.fit.sigma
+
+    @property
+    def covariance(self):
+        '''! Laplace covariance of the free parameters'''
+        return self.fit.covariance
+
+    @property
+    def chi2(self):
+        '''! Chi-squared summary of the fit (dict)'''
+        return self.fit.chi2
+
+    def equilibrium(self):
+        '''! The fitted equilibrium: a copy (`TokaMaker_equilibrium`) of the solver's state at the fit's final center
+
+        @result Equilibrium copy, or None when the fit has no consistent final center
+        '''
+        center = self.fit.record.get('center')
+        return None if center is None else center['snap']
+
+    def save_geqdsk(self, filename, **kwargs):
+        '''! Write the fitted equilibrium as a g-file with TokaMaker's own writer
+
+        The file carries the full pressure: `PRES` is the solver's pressure plus the separatrix pressure of the fit's
+        final center (TokaMaker's `lcfs_pressure`), `PPRIME` is unchanged (`kinetic.pressure.save_full_pressure_eqdsk`).
+        The g-file format has no field for the pressure factor `s_press`: its value at the final center is kept in the
+        returned record (at a value other than 1 the written pressure is that factor times the pressure of the kinetic
+        profiles).
+
+        @param filename Name of the g-file
+        @param kwargs Passed unchanged to `TokaMaker_equilibrium.save_eqdsk` (grid, `lcfs_pad`, `cocos`, ...; its
+        defaults apply); `lcfs_pressure` and `pressure_factor` are refused (both are the fit's own)
+        @result Record of the written file (file name, separatrix pressure, pressure frame, pressure factor)
+        '''
+        from .kinetic import pressure as kinetic_pressure
+        center = self.fit.record.get('center')
+        if center is None:
+            raise ValueError('the fit has no consistent final center (status {0!r}): no equilibrium to write'.format(self.status))
+        if 'pressure_factor' in kwargs:
+            raise ValueError('the pressure factor is the fit\'s own (its final center); it cannot be passed')
+        asm = center['res'].assembly or {}
+        return kinetic_pressure.save_full_pressure_eqdsk(center['snap'], filename, center['res'].solve.record['p_sep'],
+                                                         pressure_factor=asm.get('pressure_factor'), **kwargs)
+
+
+class kinetic_reconstruction():
+    '''! Kinetic equilibrium reconstruction with TokaMaker
+
+    A MAP fit of a small set of physical parameters of a current model (ohmic, bootstrap and driven current; thermal
+    and fast-ion pressure) iterated to consistency with an anchored free-boundary solve, against magnetic, coil, plasma
+    current and MSE measurements. The fit itself is `kinetic.fit.reconstruct`; this class builds its forward model
+    from a mesh file and a device description, passes the settings objects of the helper package through unchanged and
+    adds no computation. See \\ref doc_tokamaker_kinetic_reconstruction.
+
+    Only single slices are implemented (`run(..., mode='slice')`).
+    '''
+    def __init__(self, oft_env, mesh_file, machine, forward_settings=None, fit_settings=None, model_settings=None, speed=None):
+        '''! Create a kinetic reconstruction
+
+        @param oft_env OFT runtime environment (@ref OpenFUSIONToolkit._core.OFT_env "OFT_env"; one per process)
+        @param mesh_file TokaMaker mesh file (HDF5, @ref OpenFUSIONToolkit.TokaMaker.meshing.save_gs_mesh "save_gs_mesh()")
+        @param machine Device description: dict with `'vsc'` (coil name -> gain of the virtual vertical stability coil,
+        @ref OpenFUSIONToolkit.TokaMaker.TokaMaker.set_coil_vsc "set_coil_vsc()") and optionally `'r0'` (reference
+        major radius of the current model's geometry [m]) and `'name'`; a machine module supplies it
+        @param forward_settings `kinetic.forward.ForwardSettings` (None: its defaults with `vsc` from `machine`)
+        @param fit_settings `kinetic.fit.FitSettings` (None: its defaults)
+        @param model_settings `kinetic.current_model.CurrentModelSettings` (None: its defaults with `r0` from `machine`)
+        @param speed `kinetic.speed.SpeedSettings` (None: the default of `kinetic.fit.reconstruct`)
+        '''
+        from .kinetic import current_model as kinetic_model
+        from .kinetic import fit as kinetic_fit
+        from .kinetic import forward as kinetic_forward
+        from .meshing import load_gs_mesh
+        machine = dict(machine)
+        unknown = sorted(set(machine) - set(KINETIC_MACHINE_KEYS))
+        if unknown:
+            raise ValueError('unknown machine description keys {0}; known: {1}'.format(unknown, list(KINETIC_MACHINE_KEYS)))
+        if not machine.get('vsc'):
+            raise ValueError("machine['vsc'] (coil name -> vertical stability coil gain) is required: it is device data")
+        ## OFT runtime environment
+        self._oft_env = oft_env
+        ## Mesh file
+        self.mesh_file = mesh_file
+        ## Device description
+        self.machine = machine
+        ## Forward-solve settings (`ForwardSettings`)
+        self.forward_settings = self._with_device_value(forward_settings, kinetic_forward.ForwardSettings, 'vsc', dict(machine['vsc']))
+        ## Fit settings (`FitSettings`)
+        self.fit_settings = kinetic_fit.FitSettings() if fit_settings is None else fit_settings
+        ## Current-model settings (`CurrentModelSettings`)
+        self.model_settings = self._with_device_value(model_settings, kinetic_model.CurrentModelSettings, 'r0', machine.get('r0'))
+        if self.model_settings.r0 is None:
+            raise ValueError("the current model's reference major radius is required: machine['r0'] or model_settings.r0")
+        ## Speed settings (`SpeedSettings`, None: the fit's default)
+        self.speed = speed
+        self._mesh = load_gs_mesh(mesh_file)
+        self._fm = None
+        self._forward_settings_used = None
+
+    @staticmethod
+    def _with_device_value(settings, cls, name, value):
+        '''! Settings object with a device value filled in from the device description (no other field touched)'''
+        import dataclasses
+        if settings is None:
+            return cls() if value is None else cls(**{name: value})
+        if not isinstance(settings, cls):
+            raise TypeError('expected a {0}, got {1}'.format(cls.__name__, type(settings).__name__))
+        given = getattr(settings, name)
+        if value is None or given == value:
+            return settings
+        if given is None or (isinstance(given, dict) and not given):
+            return dataclasses.replace(settings, **{name: value})
+        raise ValueError('{0}.{1} = {2!r} disagrees with the device description ({3!r})'.format(cls.__name__, name, given, value))
+
+    @property
+    def forward_model(self):
+        '''! The forward model (`kinetic.forward.ForwardModel`), set up by the first @ref kinetic_reconstruction.run "run()"; None before'''
+        return self._fm
+
+    @property
+    def gs(self):
+        '''! The TokaMaker object of the forward model (None before the first @ref kinetic_reconstruction.run "run()")'''
+        return None if self._fm is None else self._fm.gs
+
+    @staticmethod
+    def _select(data, time):
+        '''! The inputs of the slice at `time`: `data[time]` for a mapping, else `data` with `data.time == time`'''
+        if isinstance(data, dict):
+            if time not in data:
+                raise ValueError('no inputs at time {0!r}; times given: {1}'.format(time, sorted(data)))
+            data = data[time]
+        if not isinstance(data, kinetic_slice_data):
+            raise TypeError('data must be a kinetic_slice_data or a dict of them keyed by time')
+        if data.time != time:
+            raise ValueError('time {0!r} differs from the measurement time {1!r} of the inputs'.format(time, data.time))
+        return data
+
+    def _forward_model_for(self, data, label):
+        '''! Set up the forward model on the first run; rebuild its rows on the same solver afterwards'''
+        import copy
+        from .kinetic import forward as kinetic_forward
+        if self._fm is None:
+            if isinstance(data.start, numpy.ndarray) and data.initial_profiles is None:
+                raise ValueError('the first run starts a new solver from psi on the mesh nodes, which has no solved '
+                                 'equilibrium to evaluate the current model on: give initial_profiles (x, <j_phi>, p)')
+            self._fm = kinetic_forward.ForwardModel(self._mesh, data.F0, data.measurements, data.boundary,
+                                                    coil_roles=data.coil_roles, settings=self.forward_settings,
+                                                    oft_env=self._oft_env, case_id=label,
+                                                    reference_points=data.reference_points)
+            self._forward_settings_used = copy.deepcopy(self.forward_settings.as_dict())
+            return self._fm
+        if self.forward_settings is not self._fm.settings or self.forward_settings.as_dict() != self._forward_settings_used:
+            raise RuntimeError('forward_settings changed after the solver was set up by the first run; they are read once '
+                               'per solver: use a new process for other forward settings')
+        self._fm.set_F0(data.F0)
+        self._fm.reconfigure(data.measurements, data.boundary, data.coil_roles, case_id=label,
+                             reference_points=data.reference_points)
+        return self._fm
+
+    def run(self, data, time, *, mode, label='fit', steady_state_check=True):
+        '''! Reconstruct
+
+        @param data Inputs (@ref kinetic_slice_data "kinetic_slice_data", or a dict of them keyed by time)
+        @param time Time of the slice [s]; must equal the measurement time of the inputs
+        @param mode `'slice'` (one slice, the only mode implemented); `'slices'` and `'series'` come with later pull
+        requests. Required: the mode is never inferred from `time`
+        @param label Label of the fit and of the forward model's case in the record
+        @param steady_state_check Record the slice's unfitted model steady state next to the fit (a record only;
+        `kinetic.fit.reconstruct`)
+        @result @ref kinetic_slice_result "kinetic_slice_result"
+        '''
+        from .kinetic import fit as kinetic_fit
+        if mode in KINETIC_MODES_LATER:
+            raise NotImplementedError("mode {0!r} ({1}) is not implemented; only mode='slice' is".format(mode, KINETIC_MODES_LATER[mode]))
+        if mode not in KINETIC_MODES:
+            raise ValueError('mode must be one of {0}; {1} come with later pull requests'.format(list(KINETIC_MODES), list(KINETIC_MODES_LATER)))
+        d = self._select(data, time)
+        fm = self._forward_model_for(d, label)
+        fr = kinetic_fit.reconstruct(fm, d.kinetics, d.sources, self.model_settings, settings=self.fit_settings,
+                                     params0=d.params0, start=d.start, initial_profiles=d.initial_profiles, label=label,
+                                     speed=self.speed, steady_state_check=steady_state_check)
+        return kinetic_slice_result(time, fr)

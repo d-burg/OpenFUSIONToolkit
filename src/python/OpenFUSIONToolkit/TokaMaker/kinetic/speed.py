@@ -46,10 +46,13 @@ class SpeedSettings:
     ``column_workers``: processes that evaluate the columns of a Jacobian at once; only 1 (serial, the default) is
     accepted by this package (values > 1 are refused when a fit starts, :func:`check_speed`).
     ``memo`` (default on): the memo of pure evaluations in the current model
-    (:func:`.diffusion.set_speed_memo`).
+    (:func:`.diffusion.set_speed_memo`), and the geometry hand-off of the pass-consistency loop (a solve that
+    starts from a fit center's snapshot uses the geometry that center's final pass evaluated on the same state;
+    :func:`.current_model.consistent_solve`).
     ``mesh_index`` (default on): the bucket-indexed exact point-in-triangle test (:func:`.diagnostics.on_mesh`).
     ``reuse_stats`` (default on): a forward solve reuses the equilibrium statistics of its latest attempt instead of
-    evaluating them again on the same state (:meth:`.forward.ForwardModel.solve`).
+    evaluating them again on the same state (:meth:`.forward.ForwardModel.solve`), and one ``get_globals`` of the solver
+    per statistics evaluation instead of two on the same state (``forward._stats``).
     ``column_time_factor`` and ``column_time_floor_s``: the time bound of a worker column
     (:func:`column_time_bound`); kept for the settings' one form and record, not used with ``column_workers = 1``."""
     column_workers: int = 1
